@@ -22,6 +22,7 @@
 #include "general.h"
 #include "jtag_scan.h"
 #include "adiv5.h"
+#include "avr_pdi.h"
 #include "riscv_debug.h"
 #include "jtag_devs.h"
 
@@ -356,6 +357,16 @@ const jtag_dev_descr_s dev_descr[] = {
 		.descr = "RISC-V debug v0.13.",
 #endif
 		.handler = riscv_jtag_dtm_handler,
+	},
+#endif
+#ifdef ENABLE_AVR
+	{
+		.idcode = 0x0000003fU,
+		.idmask = 0x00000fffU,
+#if ENABLE_DEBUG == 1
+		.descr = "AVR JTAG-PDI port.",
+#endif
+		.handler = avr_jtag_pdi_handler,
 	},
 #endif
 #if ENABLE_DEBUG == 1
