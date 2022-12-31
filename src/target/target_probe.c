@@ -129,3 +129,5 @@ TARGET_PROBE_WEAK_NOP(imxrt_probe)
 TARGET_PROBE_WEAK_NOP(zynq7_probe)
 
 LPC55_DP_PREPARE_WEAK_NOP(lpc55_dp_prepare)
+
+TARGET_PROBE_WEAK_NOP(atxmega_probe)
