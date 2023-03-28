@@ -94,6 +94,7 @@ bool rp_probe(target_s *target);
 bool renesas_probe(target_s *target);
 bool imxrt_probe(target_s *target);
 bool zynq7_probe(target_s *target);
+bool esp32c3_probe(target_s *target);
 
 void lpc55_dp_prepare(adiv5_debug_port_s *dp);
 bool esp32c3_target_prepare(target_s *target);
