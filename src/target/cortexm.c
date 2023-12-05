@@ -1241,7 +1241,7 @@ bool cortexm_run_stub(target_s *target, uint32_t loadaddr, uint32_t r0, uint32_t
 		raise_exception(EXCEPTION_ERROR, "Target lost in stub");
 
 	if (reason != TARGET_HALT_BREAKPOINT) {
-		DEBUG_WARN(" Reason %d\n", reason);
+		DEBUG_WARN(" Reason %d\n", (int)reason);
 		return false;
 	}
 
