@@ -182,8 +182,8 @@ iap_status_e lpc_iap_call(lpc_flash_s *const flash, iap_result_s *const result, 
 	/* Set the result code to something notable to help with checking if the call ran */
 	frame.result.return_code = cmd;
 
-	DEBUG_INFO("%s: cmd %d (%x), params: %08" PRIx32 " %08" PRIx32 " %08" PRIx32 " %08" PRIx32 "\n", __func__, cmd, cmd,
-		frame.config.params[0], frame.config.params[1], frame.config.params[2], frame.config.params[3]);
+	DEBUG_INFO("%s: cmd %d (%x), params: %08" PRIx32 " %08" PRIx32 " %08" PRIx32 " %08" PRIx32 "\n", __func__, (int)cmd,
+		cmd, frame.config.params[0], frame.config.params[1], frame.config.params[2], frame.config.params[3]);
 
 	/* Copy the structure to RAM */
 	target_mem_write(target, flash->iap_ram, &frame, sizeof(iap_frame_s));
