@@ -658,7 +658,7 @@ static void handle_v_packet(char *packet, const size_t plen)
 #endif
 		/* Run target program. For us (embedded) this means reset. */
 		if (cur_target) {
-			target_set_cmdline(cur_target, cmdline);
+			target_set_cmdline(cur_target, cmdline, offset);
 			target_reset(cur_target);
 			gdb_putpacketz("T05");
 		} else if (last_target) {
@@ -666,7 +666,7 @@ static void handle_v_packet(char *packet, const size_t plen)
 
 			/* If we were able to attach to the target again */
 			if (cur_target) {
-				target_set_cmdline(cur_target, cmdline);
+				target_set_cmdline(cur_target, cmdline, offset);
 				target_reset(cur_target);
 				morse(NULL, false);
 				gdb_putpacketz("T05");
