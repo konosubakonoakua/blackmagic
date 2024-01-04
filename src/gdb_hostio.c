@@ -96,25 +96,25 @@ int hostio_open(target_controller_s *tc, target_addr_t path, size_t path_len, ta
 
 int hostio_close(target_controller_s *tc, int fd)
 {
-	gdb_putpacket_f("Fclose,%08X", fd);
+	gdb_putpacket_f("Fclose,%08X", (unsigned)fd);
 	return hostio_get_response(tc);
 }
 
 int hostio_read(target_controller_s *tc, int fd, target_addr_t buf, unsigned int count)
 {
-	gdb_putpacket_f("Fread,%08X,%08" PRIX32 ",%08X", fd, buf, count);
+	gdb_putpacket_f("Fread,%08X,%08" PRIX32 ",%08X", (unsigned)fd, buf, count);
 	return hostio_get_response(tc);
 }
 
 int hostio_write(target_controller_s *tc, int fd, target_addr_t buf, unsigned int count)
 {
-	gdb_putpacket_f("Fwrite,%08X,%08" PRIX32 ",%08X", fd, buf, count);
+	gdb_putpacket_f("Fwrite,%08X,%08" PRIX32 ",%08X", (unsigned)fd, buf, count);
 	return hostio_get_response(tc);
 }
 
 long hostio_lseek(target_controller_s *tc, int fd, long offset, target_seek_flag_e flag)
 {
-	gdb_putpacket_f("Flseek,%08X,%08lX,%08X", fd, offset, flag);
+	gdb_putpacket_f("Flseek,%08X,%08lX,%08X", (unsigned)fd, (unsigned long)offset, flag);
 	return hostio_get_response(tc);
 }
 
@@ -139,7 +139,7 @@ int hostio_stat(target_controller_s *tc, target_addr_t path, size_t path_len, ta
 
 int hostio_fstat(target_controller_s *tc, int fd, target_addr_t buf)
 {
-	gdb_putpacket_f("Ffstat,%X,%08" PRIX32, fd, buf);
+	gdb_putpacket_f("Ffstat,%X,%08" PRIX32, (unsigned)fd, buf);
 	return hostio_get_response(tc);
 }
 
@@ -151,7 +151,7 @@ int hostio_gettimeofday(target_controller_s *tc, target_addr_t tv, target_addr_t
 
 int hostio_isatty(target_controller_s *tc, int fd)
 {
-	gdb_putpacket_f("Fisatty,%08X", fd);
+	gdb_putpacket_f("Fisatty,%08X", (unsigned)fd);
 	return hostio_get_response(tc);
 }
 

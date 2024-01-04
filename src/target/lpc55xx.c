@@ -341,7 +341,7 @@ static bool lpc55xx_flash_init(target_s *target, lpc55xx_flash_config_s *config)
 
 	const lpc55xx_iap_status_e status = iap_call_raw(target, IAP_CMD_FLASH_INIT, 0, 0, 0);
 	if (status != IAP_STATUS_FLASH_SUCCESS) {
-		DEBUG_ERROR("LPC55xx: IAP error: FLASH_INIT (%d)\n", status);
+		DEBUG_ERROR("LPC55xx: IAP error: FLASH_INIT (%d)\n", (int)status);
 		goto exit;
 	}
 
@@ -370,19 +370,19 @@ static bool lpc55xx_get_uuid(target_s *target, uint8_t *uuid)
 
 	lpc55xx_iap_status_e status = iap_call_raw(target, IAP_CMD_FLASH_INIT, 0, 0, 0);
 	if (status != IAP_STATUS_FLASH_SUCCESS) {
-		DEBUG_ERROR("LPC55xx: IAP error: FLASH_INIT (%d)\n", status);
+		DEBUG_ERROR("LPC55xx: IAP error: FLASH_INIT (%d)\n", (int)status);
 		goto exit;
 	}
 
 	status = iap_call_raw(target, IAP_CMD_FFR_INIT, 0, 0, 0);
 	if (status != IAP_STATUS_FLASH_SUCCESS) {
-		DEBUG_ERROR("LPC55xx: IAP error: FFR_INIT (%d)\n", status);
+		DEBUG_ERROR("LPC55xx: IAP error: FFR_INIT (%d)\n", (int)status);
 		goto exit;
 	}
 
 	status = iap_call_raw(target, IAP_CMD_FFR_GET_UUID, LPC55xx_UUID_ADDRESS, 0, 0);
 	if (status != IAP_STATUS_FLASH_SUCCESS) {
-		DEBUG_ERROR("LPC55xx: IAP error: FFR_GET_UUID (%d)\n", status);
+		DEBUG_ERROR("LPC55xx: IAP error: FFR_GET_UUID (%d)\n", (int)status);
 		goto exit;
 	}
 
@@ -430,7 +430,7 @@ static bool lpc55xx_flash_prepare(target_flash_s *flash)
 
 	const lpc55xx_iap_status_e status = iap_call_raw(flash->t, IAP_CMD_FLASH_INIT, 0, 0, 0);
 	if (status != IAP_STATUS_FLASH_SUCCESS)
-		DEBUG_ERROR("LPC55xx: IAP error: FLASH_INIT (%d)\n", status);
+		DEBUG_ERROR("LPC55xx: IAP error: FLASH_INIT (%d)\n", (int)status);
 	return status == IAP_STATUS_FLASH_SUCCESS;
 }
 
@@ -439,7 +439,7 @@ static bool lpc55xx_flash_erase(target_flash_s *flash, target_addr_t addr, size_
 	const lpc55xx_iap_status_e status =
 		iap_call_raw(flash->t, IAP_CMD_FLASH_ERASE, addr, (uint32_t)len, LPC55xx_ERASE_KEY);
 	if (status != IAP_STATUS_FLASH_SUCCESS)
-		DEBUG_ERROR("LPC55xx: IAP error: FLASH_ERASE (%d)\n", status);
+		DEBUG_ERROR("LPC55xx: IAP error: FLASH_ERASE (%d)\n", (int)status);
 	return status == IAP_STATUS_FLASH_SUCCESS;
 }
 
@@ -450,7 +450,7 @@ static bool lpc55xx_flash_write(target_flash_s *flash, target_addr_t dest, const
 	const lpc55xx_iap_status_e status =
 		iap_call_raw(flash->t, IAP_CMD_FLASH_PROGRAM, dest, LPC55xx_WRITE_BUFFER_ADDRESS, (uint32_t)len);
 	if (status != IAP_STATUS_FLASH_SUCCESS)
-		DEBUG_ERROR("LPC55xx: IAP error: FLASH_PROGRAM (%d)\n", status);
+		DEBUG_ERROR("LPC55xx: IAP error: FLASH_PROGRAM (%d)\n", (int)status);
 	return status == IAP_STATUS_FLASH_SUCCESS;
 }
 

@@ -58,10 +58,10 @@
 #include <stdlib.h>
 
 typedef enum gdb_signal {
-	GDB_SIGINT = 2,
-	GDB_SIGTRAP = 5,
-	GDB_SIGSEGV = 11,
-	GDB_SIGLOST = 29,
+	GDB_SIGINT = 2U,
+	GDB_SIGTRAP = 5U,
+	GDB_SIGSEGV = 11U,
+	GDB_SIGLOST = 29U,
 } gdb_signal_e;
 
 #define GDB_MAX_PACKET_SIZE 1024U
@@ -834,19 +834,19 @@ void gdb_poll_target(void)
 	/* Translate reason to GDB signal */
 	switch (reason) {
 	case TARGET_HALT_ERROR:
-		gdb_putpacket_f("X%02X", GDB_SIGLOST);
+		gdb_putpacket_f("X%02X", (unsigned)GDB_SIGLOST);
 		morse("TARGET LOST.", true);
 		break;
 	case TARGET_HALT_REQUEST:
-		gdb_putpacket_f("T%02X", GDB_SIGINT);
+		gdb_putpacket_f("T%02X", (unsigned)GDB_SIGINT);
 		break;
 	case TARGET_HALT_WATCHPOINT:
-		gdb_putpacket_f("T%02Xwatch:%08" PRIX32 ";", GDB_SIGTRAP, watch);
+		gdb_putpacket_f("T%02Xwatch:%08" PRIX32 ";", (unsigned)GDB_SIGTRAP, watch);
 		break;
 	case TARGET_HALT_FAULT:
-		gdb_putpacket_f("T%02X", GDB_SIGSEGV);
+		gdb_putpacket_f("T%02X", (unsigned)GDB_SIGSEGV);
 		break;
 	default:
-		gdb_putpacket_f("T%02X", GDB_SIGTRAP);
+		gdb_putpacket_f("T%02X", (unsigned)GDB_SIGTRAP);
 	}
 }
