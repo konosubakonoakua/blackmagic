@@ -262,7 +262,6 @@ int gdb_main_loop(target_controller_s *tc, char *pbuf, size_t pbuf_size, size_t 
 		break;
 	}
 
-#if PC_HOSTED == 0
 	case 'F': /* Semihosting call finished */
 		if (in_syscall)
 			return semihosting_reply(tc, pbuf, size);
@@ -271,10 +270,6 @@ int gdb_main_loop(target_controller_s *tc, char *pbuf, size_t pbuf_size, size_t 
 			gdb_putpacketz("");
 		}
 		break;
-#else
-		(void)tc;
-		(void)in_syscall;
-#endif
 
 	case '!': /* Enable Extended GDB Protocol. */
 		/*
