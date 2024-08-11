@@ -20,6 +20,11 @@
 
 /* This file provides the platform specific declarations for the blackpill-f4 implementation. */
 
+/* References: ST doc
+ * RM0383 Rev 3, 2015: https://www.st.com/resource/en/reference_manual/dm00119316-stm32f411xc-e-advanced-arm-based-32-bit-mcus-stmicroelectronics.pdf
+ * DS10314 Rev 7, 2017: https://www.st.com/resource/en/datasheet/stm32f411ce.pdf
+ */
+
 #ifndef PLATFORMS_COMMON_BLACKPILL_F4_H
 #define PLATFORMS_COMMON_BLACKPILL_F4_H
 
@@ -28,6 +33,8 @@
 #include "timing_stm32.h"
 
 #define PLATFORM_HAS_TRACESWO
+#define NUM_TRACE_PACKETS 256U /* 16K buffer */
+#define TRACESWO_PROTOCOL 2U   /* 1 = RZ/Manchester, 2 = NRZ/async/uart */
 
 #if ENABLE_DEBUG == 1
 #define PLATFORM_HAS_DEBUG
@@ -205,8 +212,10 @@ extern bool debug_bmp;
 #define USBUSART_DMA_TRG DMA_SxCR_CHSEL_4
 
 /*
- * To use USART1 as USBUSART, DMA2 is selected from https://www.st.com/resource/en/reference_manual/dm00119316-stm32f411xc-e-advanced-arm-based-32-bit-mcus-stmicroelectronics.pdf, page 170, table 28.
+ * To use USART1 as USBUSART, DMA2 is selected from RM0383, page 170, table 28.
  * This table defines USART1_TX as stream 7, channel 4, and USART1_RX as stream 5, channel 4.
+ * Because USART1 is on APB2 with max Pclk of 100 MHz,
+ * reachable baudrates are up to 12.5M with OVER8 or 6.25M with default OVER16 (per DS10314, page 31, table 6)
  */
 #define USBUSART1                USART1
 #define USBUSART1_CR1            USART1_CR1
@@ -227,8 +236,10 @@ extern bool debug_bmp;
 #define USBUSART1_DMA_RX_ISRx(x) dma2_stream5_isr(x)
 
 /*
- * To use USART2 as USBUSART, DMA1 is selected from https://www.st.com/resource/en/reference_manual/dm00119316-stm32f411xc-e-advanced-arm-based-32-bit-mcus-stmicroelectronics.pdf, page 170, table 27.
+ * To use USART2 as USBUSART, DMA1 is selected from RM0383, page 170, table 27.
  * This table defines USART2_TX as stream 6, channel 4, and USART2_RX as stream 5, channel 4.
+ * Because USART2 is on APB1 with max Pclk of 50 MHz,
+ * reachable baudrates are up to 6.25M with OVER8 or 3.125M with default OVER16 (per DS10314, page 31, table 6)
  */
 #define USBUSART2                USART2
 #define USBUSART2_CR1            USART2_CR1
@@ -272,11 +283,28 @@ extern bool debug_bmp;
 #define IRQ_PRI_USBUSART     (2U << 4U)
 #define IRQ_PRI_USBUSART_DMA (2U << 4U)
 #define IRQ_PRI_TRACE        (0U << 4U)
+#define IRQ_PRI_SWO_DMA      (0U << 4U)
 
 #define TRACE_TIM          TIM3
 #define TRACE_TIM_CLK_EN() rcc_periph_clock_enable(RCC_TIM3)
 #define TRACE_IRQ          NVIC_TIM3_IRQ
 #define TRACE_ISR(x)       tim3_isr(x)
+
+/* On F411 use USART1_RX mapped on PB7 for async capture */
+#define SWO_UART        USBUSART1
+#define SWO_UART_CLK    USBUSART1_CLK
+#define SWO_UART_DR     USBUSART1_DR
+#define SWO_UART_PORT   GPIOB
+#define SWO_UART_RX_PIN GPIO7
+#define SWO_UART_PIN_AF GPIO_AF7
+
+/* Bind to the same DMA Rx channel */
+#define SWO_DMA_BUS    USBUSART1_DMA_BUS
+#define SWO_DMA_CLK    USBUSART1_DMA_CLK
+#define SWO_DMA_CHAN   USBUSART1_DMA_RX_CHAN
+#define SWO_DMA_IRQ    USBUSART1_DMA_RX_IRQ
+#define SWO_DMA_ISR(x) USBUSART1_DMA_RX_ISRx(x)
+#define SWO_DMA_TRG    DMA_SxCR_CHSEL_4
 
 #define SET_RUN_STATE(state)      \
 	{                             \

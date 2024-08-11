@@ -1,7 +1,8 @@
 # This file is part of the Black Magic Debug project.
 #
-# Copyright (C) 2023 1BitSquared <info@1bitsquared.com>
+# Copyright (C) 2023-2024 1BitSquared <info@1bitsquared.com>
 # Written by Rafael Silva <perigoso@riseup.net>
+# Modified by Rachel Mant <git@dragonmux.network>
 #
 # Redistribution and use in source and binary forms, with or without
 # modification, are permitted provided that the following conditions are met:
@@ -70,11 +71,14 @@ if is_firmware_build
 		'cortexm': 'Cortex-M support',
 		'riscv32': 'RISC-V 32-bit support',
 		'riscv64': 'RISC-V 64-bit support',
+		'at32f4': 'Arterytek parts',
+		'ch579': 'CH579',
 		'efm': 'Energy Micro parts',
 		'hc32': 'HC32 parts',
 		'lpc': 'LPC series parts',
 		'nrf': 'nRF series parts',
 		'nxp': 'Kinetis series parts',
+		'puya': 'Puya PY32 series parts',
 		'renesas': 'Renesas parts',
 		'rp': 'RP2040',
 		'sam': 'ATSAM series parts',
@@ -127,12 +131,18 @@ target_cortexm = declare_dependency(
 	dependencies: target_cortex,
 )
 
+riscv_jtag_dtm = declare_dependency(
+	sources: files(
+		'riscv_jtag_dtm.c',
+	),
+)
+
 target_riscv = declare_dependency(
 	sources: files(
 		'riscv_debug.c',
-		'riscv_jtag_dtm.c',
 	),
 	compile_args: ['-DENABLE_RISCV=1'],
+	dependencies: riscv_jtag_dtm,
 )
 
 target_riscv32 = declare_dependency(
@@ -143,6 +153,11 @@ target_riscv32 = declare_dependency(
 target_riscv64 = declare_dependency(
 	sources: files('riscv64.c'),
 	dependencies: target_riscv,
+)
+
+target_ch579 = declare_dependency(
+	sources: files('ch579.c'),
+	dependencies: target_cortexm,
 )
 
 target_efm = declare_dependency(
@@ -182,7 +197,13 @@ target_nxp = declare_dependency(
 		'imxrt.c',
 		'kinetis.c',
 		'nxpke04.c',
+		's32k3xx.c',
 	),
+	dependencies: target_cortexm,
+)
+
+target_puya = declare_dependency(
+	sources: files('puya.c'),
 	dependencies: target_cortexm,
 )
 
@@ -229,7 +250,6 @@ endif
 
 target_stm = declare_dependency(
 	sources: files(
-		'at32f43x.c',
 		'ch32f1.c',
 		'stm32f1.c',
 		'stm32f4.c',
@@ -239,8 +259,16 @@ target_stm = declare_dependency(
 		'stm32l0.c',
 		'stm32l4.c',
 		'stm32mp15.c',
+		'stm32_common.c',
 	),
 	dependencies: target_stm_deps,
+)
+
+target_at32f4 = declare_dependency(
+	sources: files(
+		'at32f43x.c',
+	),
+	dependencies: target_cortexm,
 )
 
 target_ti = declare_dependency(
@@ -257,6 +285,7 @@ target_xilinx = declare_dependency(
 		'zynq7000.c',
 	),
 	dependencies: target_cortexar,
+	compile_args: ['-DENABLE_XILINX=1'],
 )
 
 if is_firmware_build
@@ -265,6 +294,14 @@ if is_firmware_build
 	foreach target : enabled_targets
 		enabled_target_deps += get_variable(f'target_@target@')
 	endforeach
+
+	# Check if we should enable the RISC-V Debug remote protocol acceleration and do so if required
+	if get_option('enable_riscv_accel')
+		enabled_target_deps += declare_dependency(
+			compile_args: ['-DENABLE_RISCV_ACCEL=1'],
+			dependencies: riscv_jtag_dtm,
+		)
+	endif
 
 	# BMD target dependency
 	bmd_targets = declare_dependency(
@@ -281,11 +318,14 @@ libbmd_target_deps = [
 	target_riscv32,
 	target_riscv64,
 	# Enable all targets for libbmd
+	target_at32f4,
+	target_ch579,
 	target_efm,
 	target_hc32,
 	target_lpc,
 	target_nrf,
 	target_nxp,
+	target_puya,
 	target_renesas_ra,
 	target_renesas_rz,
 	target_rp,

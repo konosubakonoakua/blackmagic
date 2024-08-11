@@ -34,6 +34,9 @@
 #include "sfdp.h"
 #include "target.h"
 #include "adiv5.h"
+#if defined(ENABLE_RISCV_ACCEL) && ENABLE_RISCV_ACCEL == 1
+#include "riscv_debug.h"
+#endif
 #include "version.h"
 #include "exception.h"
 #include "hex_utils.h"
@@ -116,8 +119,8 @@ static void remote_respond_string(const char response_code, const char *const st
  * pointers to reconfigure this structure appropriately.
  */
 static adiv5_debug_port_s remote_dp = {
-	.ap_read = firmware_ap_read,
-	.ap_write = firmware_ap_write,
+	.ap_read = adiv5_ap_reg_read,
+	.ap_write = adiv5_ap_reg_write,
 	.mem_read = advi5_mem_read_bytes,
 	.mem_write = adiv5_mem_write_bytes,
 };
@@ -129,10 +132,10 @@ static void remote_packet_process_swd(const char *const packet, const size_t pac
 		if (packet_len == 2) {
 			remote_dp.write_no_check = adiv5_swd_write_no_check;
 			remote_dp.read_no_check = adiv5_swd_read_no_check;
-			remote_dp.dp_read = firmware_swdp_read;
+			remote_dp.dp_read = adiv5_swd_read;
 			remote_dp.error = adiv5_swd_clear_error;
-			remote_dp.low_access = firmware_swdp_low_access;
-			remote_dp.abort = firmware_swdp_abort;
+			remote_dp.low_access = adiv5_swd_raw_access;
+			remote_dp.abort = adiv5_swd_abort;
 			swdptap_init();
 			remote_respond(REMOTE_RESP_OK, 0);
 		} else
@@ -142,8 +145,8 @@ static void remote_packet_process_swd(const char *const packet, const size_t pac
 	case REMOTE_IN_PAR: { /* SI = In parity ============================= */
 		const size_t clock_cycles = hex_string_to_num(2, packet + 2);
 		uint32_t result = 0;
-		const bool parity_error = swd_proc.seq_in_parity(&result, clock_cycles);
-		remote_respond(parity_error ? REMOTE_RESP_PARERR : REMOTE_RESP_OK, result);
+		const bool parity_ok = swd_proc.seq_in_parity(&result, clock_cycles);
+		remote_respond(parity_ok ? REMOTE_RESP_OK : REMOTE_RESP_PARERR, result);
 		break;
 	}
 
@@ -182,10 +185,10 @@ static void remote_packet_process_jtag(const char *const packet, const size_t pa
 	case REMOTE_INIT: /* JS = initialise ============================= */
 		remote_dp.write_no_check = NULL;
 		remote_dp.read_no_check = NULL;
-		remote_dp.dp_read = fw_adiv5_jtagdp_read;
-		remote_dp.error = adiv5_jtagdp_error;
-		remote_dp.low_access = fw_adiv5_jtagdp_low_access;
-		remote_dp.abort = adiv5_jtagdp_abort;
+		remote_dp.dp_read = adiv5_jtag_read;
+		remote_dp.error = adiv5_jtag_clear_error;
+		remote_dp.low_access = adiv5_jtag_raw_access;
+		remote_dp.abort = adiv5_jtag_abort;
 		jtagtap_init();
 		remote_respond(REMOTE_RESP_OK, 0);
 		break;
@@ -323,7 +326,7 @@ static void remote_packet_process_high_level(const char *packet, const size_t pa
 		remote_respond(REMOTE_RESP_OK, REMOTE_HL_VERSION);
 		break;
 
-	case REMOTE_ADD_JTAG_DEV: { /* HJ = fill firmware jtag_devs */
+	case REMOTE_HL_ADD_JTAG_DEV: { /* HJ = fill firmware jtag_devs */
 		/* Check the packet is an appropriate length */
 		if (packet_len < 22U) {
 			remote_respond(REMOTE_RESP_ERR, REMOTE_ERROR_WRONGLEN);
@@ -340,6 +343,17 @@ static void remote_packet_process_high_level(const char *packet, const size_t pa
 		jtag_dev.current_ir = hex_string_to_num(8, packet + 14);
 		jtag_add_device(index, &jtag_dev);
 		remote_respond(REMOTE_RESP_OK, 0);
+		break;
+	}
+
+	case REMOTE_HL_ACCEL: { /* HA = request what accelerations are available */
+		/* Build a response value that depends on what things are built into the firmare */
+		remote_respond(REMOTE_RESP_OK,
+			REMOTE_ACCEL_ADIV5
+#if defined(ENABLE_RISCV_ACCEL) && ENABLE_RISCV_ACCEL == 1
+				| REMOTE_ACCEL_RISCV
+#endif
+		);
 		break;
 	}
 
@@ -374,6 +388,7 @@ static void remote_packet_process_adiv5(const char *const packet, const size_t p
 
 	/* Set up the DP and a fake AP structure to perform the access with */
 	remote_dp.dev_index = hex_string_to_num(2, packet + 2);
+	remote_dp.fault = 0U;
 	adiv5_access_port_s remote_ap;
 	remote_ap.apsel = hex_string_to_num(2, packet + 4);
 	remote_ap.dp = &remote_dp;
@@ -389,7 +404,7 @@ static void remote_packet_process_adiv5(const char *const packet, const size_t p
 		break;
 	}
 	/* Raw access comands */
-	case REMOTE_ADIv5_RAW_ACCESS: { /* AR = Perform a raw ADIv5 access */
+	case REMOTE_ADIV5_RAW_ACCESS: { /* AR = Perform a raw ADIv5 access */
 		/* Grab the address to perform an access against and the value to work with */
 		const uint16_t addr = hex_string_to_num(4, packet + 6);
 		const uint32_t value = hex_string_to_num(8, packet + 10);
@@ -419,10 +434,10 @@ static void remote_packet_process_adiv5(const char *const packet, const size_t p
 		/* Grab the CSW value to use in the access */
 		remote_ap.csw = hex_string_to_num(8, packet + 6);
 		/* Grab the start address for the read */
-		const uint32_t address = hex_string_to_num(8, packet + 14U);
+		const target_addr64_t address = hex_string_to_num(16, packet + 14U);
 		/* And how many bytes to read, validating it for buffer overflows */
-		const uint32_t length = hex_string_to_num(8, packet + 22U);
-		if (length > 1024U) {
+		const uint32_t length = hex_string_to_num(8, packet + 30U);
+		if (length > GDB_PACKET_BUFFER_SIZE - REMOTE_ADIV5_MEM_READ_LENGTH) {
 			remote_respond(REMOTE_RESP_PARERR, 0);
 			break;
 		}
@@ -439,10 +454,10 @@ static void remote_packet_process_adiv5(const char *const packet, const size_t p
 		/* Grab the alignment for the access */
 		const align_e align = hex_string_to_num(2, packet + 14U);
 		/* Grab the start address for the write */
-		const uint32_t dest = hex_string_to_num(8, packet + 16U);
+		const target_addr64_t address = hex_string_to_num(16, packet + 16U);
 		/* And how many bytes to read, validating it for buffer overflows */
-		const size_t length = hex_string_to_num(8, packet + 24U);
-		if (length > 1024U) {
+		const uint32_t length = hex_string_to_num(8, packet + 32U);
+		if (length > GDB_PACKET_BUFFER_SIZE - REMOTE_ADIV5_MEM_WRITE_LENGTH) {
 			remote_respond(REMOTE_RESP_PARERR, 0);
 			break;
 		}
@@ -454,9 +469,9 @@ static void remote_packet_process_adiv5(const char *const packet, const size_t p
 		/* Get the aligned packet buffer to reuse for the data to write */
 		void *data = gdb_packet_buffer();
 		/* And decode the data from the packet into it */
-		unhexify(data, packet + 32U, length);
+		unhexify(data, packet + 40U, length);
 		/* Perform the write and report success/failures */
-		adiv5_mem_write_sized(&remote_ap, dest, data, length, align);
+		adiv5_mem_write_aligned(&remote_ap, address, data, length, align);
 		remote_adiv5_respond(NULL, 0);
 		break;
 	}
@@ -467,6 +482,107 @@ static void remote_packet_process_adiv5(const char *const packet, const size_t p
 	}
 	SET_IDLE_STATE(1);
 }
+
+#if defined(ENABLE_RISCV_ACCEL) && ENABLE_RISCV_ACCEL == 1
+/*
+ * This faked RISC-V DMI structure holds the currently used low-level implementation functions and basic DMI
+ * state for remote protocol requests made. This is for use by remote_packet_process_riscv() so it can do the right
+ * thing.
+ *
+ * REMOTE_INIT for RISC-V Debug rewrite the read and write function pointers to reconfigure this structure appropriately.
+ */
+static riscv_dmi_s remote_dmi = {
+	.read = NULL,
+	.write = NULL,
+};
+
+void remote_packet_process_riscv(const char *const packet, const size_t packet_len)
+{
+	/* Our shortest RISC-V Debug protocol packet is 2 bytes long, check that we have at least that */
+	if (packet_len < 2U) {
+		remote_respond(REMOTE_RESP_PARERR, 0);
+		return;
+	}
+
+	/* Check for and handle the protocols packet */
+	if (packet[1U] == REMOTE_RISCV_PROTOCOLS) {
+		/* Validate the length of the packet, then handle it if that checks out */
+		if (packet_len != 2U)
+			remote_respond(REMOTE_RESP_PARERR, 0);
+		else
+			remote_respond(REMOTE_RESP_OK, REMOTE_RISCV_PROTOCOL_JTAG);
+		return;
+	}
+	/* Check for and handle the initialisation packet */
+	else if (packet[1U] == REMOTE_INIT) {
+		/* Check the length of the packet */
+		if (packet_len != 3U) {
+			remote_respond(REMOTE_RESP_PARERR, 0);
+			return;
+		}
+
+		/* We got a good packet, so handle initialisation accordingly */
+		switch (packet[2U]) {
+		case REMOTE_RISCV_JTAG:
+			remote_dmi.read = riscv_jtag_dmi_read;
+			remote_dmi.write = riscv_jtag_dmi_write;
+			remote_respond(REMOTE_RESP_OK, 0);
+			break;
+		/* If the protocol requested is not supported, bubble that up to the host */
+		default:
+			remote_respond(REMOTE_RESP_PARERR, REMOTE_ERROR_UNRECOGNISED);
+			break;
+		}
+		return;
+	}
+	/* Our shortest RISC-V protocol packet is 16 bytes long, check that we have at least that */
+	else if (packet_len < 16U) {
+		remote_respond(REMOTE_RESP_PARERR, 0);
+		return;
+	}
+
+	/* Having dealt with the other requests, set up the fake DMI structure to perform the access with */
+	remote_dmi.dev_index = hex_string_to_num(2, packet + 2);
+	remote_dmi.idle_cycles = hex_string_to_num(2, packet + 4);
+	remote_dmi.address_width = hex_string_to_num(2, packet + 6);
+	remote_dmi.fault = 0U;
+
+	switch (packet[1U]) {
+	case REMOTE_RISCV_DMI_READ: {
+		/* Grab the DMI address to read from and try to perform the access */
+		const uint32_t addr = hex_string_to_num(8, packet + 8);
+		uint32_t value = 0;
+		if (!remote_dmi.read(&remote_dmi, addr, &value))
+			/* If the request didn't work, and caused a fault, tell the host */
+			remote_respond(REMOTE_RESP_ERR, REMOTE_ERROR_FAULT | ((uint16_t)remote_dmi.fault << 8U));
+		else
+			/* Otherwise reply back with the read data */
+			remote_respond_buf(REMOTE_RESP_OK, &value, 4U);
+		break;
+	}
+	case REMOTE_RISCV_DMI_WRITE: {
+		/* Write packets are 24 bytes long, verify we have enough bytes */
+		if (packet_len != 24U) {
+			remote_respond(REMOTE_RESP_PARERR, 0);
+			break;
+		}
+		/* Grab the DMI address to write to and the data to write then try to perform the access */
+		const uint32_t addr = hex_string_to_num(8, packet + 8);
+		const uint32_t value = hex_string_to_num(8, packet + 16);
+		if (!remote_dmi.write(&remote_dmi, addr, value))
+			/* If the request didn't work, and caused a fault, tell the host */
+			remote_respond(REMOTE_RESP_ERR, REMOTE_ERROR_FAULT | ((uint16_t)remote_dmi.fault << 8U));
+		else
+			/* Otherwise inform the host the request succeeded */
+			remote_respond(REMOTE_RESP_OK, 0);
+		break;
+	}
+	default:
+		remote_respond(REMOTE_RESP_ERR, REMOTE_ERROR_UNRECOGNISED);
+		break;
+	}
+}
+#endif
 
 static void remote_spi_respond(const bool result)
 {
@@ -582,39 +698,46 @@ void remote_packet_process_spi(const char *const packet, const size_t packet_len
 	}
 }
 
-void remote_packet_process(unsigned i, char *packet)
+void remote_packet_process(char *const packet, const size_t packet_length)
 {
 	switch (packet[0]) {
 	case REMOTE_SWDP_PACKET:
-		remote_packet_process_swd(packet, i);
+		remote_packet_process_swd(packet, packet_length);
 		break;
 
 	case REMOTE_JTAG_PACKET:
-		remote_packet_process_jtag(packet, i);
+		remote_packet_process_jtag(packet, packet_length);
 		break;
 
 	case REMOTE_GEN_PACKET:
-		remote_packet_process_general(packet, i);
+		remote_packet_process_general(packet, packet_length);
 		break;
 
 	case REMOTE_HL_PACKET:
-		remote_packet_process_high_level(packet, i);
+		remote_packet_process_high_level(packet, packet_length);
 		break;
 
-	case REMOTE_ADIv5_PACKET: {
+	case REMOTE_ADIV5_PACKET: {
 		/* Setup an exception frame to try the ADIv5 operation in */
-		volatile exception_s error = {0};
-		TRY_CATCH (error, EXCEPTION_ALL) {
-			remote_packet_process_adiv5(packet, i);
+		TRY (EXCEPTION_ALL) {
+			remote_packet_process_adiv5(packet, packet_length);
 		}
+		CATCH () {
 		/* Handle any exception we've caught by translating it into a remote protocol response */
-		if (error.type)
-			remote_respond(REMOTE_RESP_ERR, REMOTE_ERROR_EXCEPTION | ((uint64_t)error.type << 8U));
+		default:
+			remote_respond(REMOTE_RESP_ERR, REMOTE_ERROR_EXCEPTION | ((uint64_t)exception_frame.type << 8U));
+		}
 		break;
 	}
 
+#if defined(ENABLE_RISCV_ACCEL) && ENABLE_RISCV_ACCEL == 1
+	case REMOTE_RISCV_PACKET:
+		remote_packet_process_riscv(packet, packet_length);
+		break;
+#endif
+
 	case REMOTE_SPI_PACKET:
-		remote_packet_process_spi(packet, i);
+		remote_packet_process_spi(packet, packet_length);
 		break;
 
 	default: /* Oh dear, unrecognised, return an error */

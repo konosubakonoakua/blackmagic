@@ -31,17 +31,17 @@
 #include "target.h"
 #include "target_internal.h"
 
-uint8_t make_packet_request(uint8_t RnW, uint16_t addr)
+uint8_t make_packet_request(uint8_t rnw, uint16_t addr)
 {
-	bool APnDP = addr & ADIV5_APnDP;
+	bool is_ap = addr & ADIV5_APnDP;
 
 	addr &= 0xffU;
 
 	uint8_t request = 0x81U; /* Park and Startbit */
 
-	if (APnDP)
+	if (is_ap)
 		request ^= 0x22U;
-	if (RnW)
+	if (rnw)
 		request ^= 0x24U;
 
 	addr &= 0xcU;
@@ -159,10 +159,10 @@ bool adiv5_swd_scan(const uint32_t targetid)
 
 	dp->write_no_check = adiv5_swd_write_no_check;
 	dp->read_no_check = adiv5_swd_read_no_check;
+	dp->dp_read = adiv5_swd_read;
+	dp->low_access = adiv5_swd_raw_access;
 	dp->error = adiv5_swd_clear_error;
-	dp->dp_read = firmware_swdp_read;
-	dp->low_access = firmware_swdp_low_access;
-	dp->abort = firmware_swdp_abort;
+	dp->abort = adiv5_swd_abort;
 
 #if PC_HOSTED == 0
 	swdptap_init();
@@ -312,14 +312,14 @@ void adiv5_swd_multidrop_scan(adiv5_debug_port_s *const dp, const uint32_t targe
 
 		/* Allocate a new target DP for this instance */
 		adiv5_debug_port_s *const target_dp = calloc(1, sizeof(*dp));
-		if (!dp) { /* calloc failed: heap exhaustion */
+		if (!target_dp) { /* calloc failed: heap exhaustion */
 			DEBUG_ERROR("calloc: failed in %s\n", __func__);
 			break;
 		}
 
 		/* Populate the target DP from the initial one */
 		memcpy(target_dp, dp, sizeof(*dp));
-		target_dp->instance = instance;
+		target_dp->dev_index = instance;
 
 		/* Yield the target DP to adiv5_dp_init */
 		adiv5_dp_abort(target_dp, ADIV5_DP_ABORT_STKERRCLR);
@@ -330,7 +330,7 @@ void adiv5_swd_multidrop_scan(adiv5_debug_port_s *const dp, const uint32_t targe
 	free(dp);
 }
 
-uint32_t firmware_swdp_read(adiv5_debug_port_s *dp, uint16_t addr)
+uint32_t adiv5_swd_read(adiv5_debug_port_s *dp, uint16_t addr)
 {
 	if (addr & ADIV5_APnDP) {
 		adiv5_dp_recoverable_access(dp, ADIV5_LOW_READ, addr, 0);
@@ -375,12 +375,12 @@ uint32_t adiv5_swd_clear_error(adiv5_debug_port_s *const dp, const bool protocol
 	return err;
 }
 
-uint32_t firmware_swdp_low_access(adiv5_debug_port_s *dp, const uint8_t RnW, const uint16_t addr, const uint32_t value)
+uint32_t adiv5_swd_raw_access(adiv5_debug_port_s *dp, const uint8_t rnw, const uint16_t addr, const uint32_t value)
 {
 	if ((addr & ADIV5_APnDP) && dp->fault)
 		return 0;
 
-	const uint8_t request = make_packet_request(RnW, addr);
+	const uint8_t request = make_packet_request(rnw, addr);
 	uint32_t response = 0;
 	uint8_t ack = SWDP_ACK_WAIT;
 	platform_timeout_s timeout;
@@ -422,8 +422,8 @@ uint32_t firmware_swdp_low_access(adiv5_debug_port_s *dp, const uint8_t RnW, con
 		raise_exception(EXCEPTION_ERROR, "SWD invalid ACK");
 	}
 
-	if (RnW) {
-		if (swd_proc.seq_in_parity(&response, 32U)) { /* Give up on parity error */
+	if (rnw) {
+		if (!swd_proc.seq_in_parity(&response, 32U)) { /* Give up on parity error */
 			dp->fault = 1U;
 			DEBUG_ERROR("SWD access resulted in parity error\n");
 			raise_exception(EXCEPTION_ERROR, "SWD parity error");
@@ -445,7 +445,7 @@ uint32_t firmware_swdp_low_access(adiv5_debug_port_s *dp, const uint8_t RnW, con
 	return response;
 }
 
-void firmware_swdp_abort(adiv5_debug_port_s *dp, uint32_t abort)
+void adiv5_swd_abort(adiv5_debug_port_s *dp, uint32_t abort)
 {
 	adiv5_dp_write(dp, ADIV5_DP_ABORT, abort);
 }

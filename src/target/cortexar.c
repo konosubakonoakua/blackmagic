@@ -123,6 +123,10 @@ typedef struct cortexar_priv {
 #define CORTEXAR_DBG_DSCR_INTERRUPT_DISABLE  (1U << 11U)
 #define CORTEXAR_DBG_DSCR_ITR_ENABLE         (1U << 13U)
 #define CORTEXAR_DBG_DSCR_HALTING_DBG_ENABLE (1U << 14U)
+#define CORTEXAR_DBG_DCSR_DCC_MASK           0x00300000U
+#define CORTEXAR_DBG_DCSR_DCC_NORMAL         0x00000000U
+#define CORTEXAR_DBG_DCSR_DCC_STALL          0x00100000U
+#define CORTEXAR_DBG_DCSR_DCC_FAST           0x00200000U
 #define CORTEXAR_DBG_DSCR_INSN_COMPLETE      (1U << 24U)
 #define CORTEXAR_DBG_DSCR_DTR_READ_READY     (1U << 29U)
 #define CORTEXAR_DBG_DSCR_DTR_WRITE_DONE     (1U << 30U)
@@ -189,6 +193,14 @@ typedef struct cortexar_priv {
 #define CORTEXAR_CPSR_MODE_HYP  0x0000001aU
 #define CORTEXAR_CPSR_MODE_SYS  0x0000001fU
 #define CORTEXAR_CPSR_THUMB     (1U << 5U)
+
+/* Banked register offsets for when using using the DB{0,3} interface */
+enum {
+	CORTEXAR_BANKED_DTRTX,
+	CORTEXAR_BANKED_ITR,
+	CORTEXAR_BANKED_DCSR,
+	CORTEXAR_BANKED_DTRRX
+};
 
 /*
  * Table of encodings for the banked SPSRs - These are encoded in the following format:
@@ -363,13 +375,13 @@ static_assert(ARRAY_LENGTH(cortexr_spr_types) == ARRAY_LENGTH(cortexr_spr_names)
 /* clang-format on */
 
 static bool cortexar_check_error(target_s *target);
-static void cortexar_mem_read(target_s *target, void *dest, target_addr_t src, size_t len);
-static void cortexar_mem_write(target_s *target, target_addr_t dest, const void *src, size_t len);
+static void cortexar_mem_read(target_s *target, void *dest, target_addr64_t src, size_t len);
+static void cortexar_mem_write(target_s *target, target_addr64_t dest, const void *src, size_t len);
 
 static void cortexar_regs_read(target_s *target, void *data);
 static void cortexar_regs_write(target_s *target, const void *data);
-static ssize_t cortexar_reg_read(target_s *target, uint32_t reg, void *data, size_t max);
-static ssize_t cortexar_reg_write(target_s *target, uint32_t reg, const void *data, size_t max);
+static size_t cortexar_reg_read(target_s *target, uint32_t reg, void *data, size_t max);
+static size_t cortexar_reg_write(target_s *target, uint32_t reg, const void *data, size_t max);
 
 static void cortexar_reset(target_s *target);
 static target_halt_reason_e cortexar_halt_poll(target_s *target, target_addr_t *watch);
@@ -385,14 +397,20 @@ void cortexar_detach(target_s *target);
 
 static const char *cortexar_target_description(target_s *target);
 
-static bool cortexar_run_insn(target_s *const target, const uint32_t insn)
+static void cortexar_banked_dcc_mode(target_s *const target)
 {
-	/* Issue the requested instruction to the core */
-	cortex_dbg_write32(target, CORTEXAR_DBG_ITR, insn);
-	/* Poll for the instruction to complete */
-	uint32_t status = 0;
-	while (!(status & CORTEXAR_DBG_DSCR_INSN_COMPLETE))
-		status = cortex_dbg_read32(target, CORTEXAR_DBG_DSCR);
+	cortexar_priv_s *const priv = (cortexar_priv_s *)target->priv;
+	if (!(priv->base.ap->dp->quirks & ADIV5_AP_ACCESS_BANKED)) {
+		priv->base.ap->dp->quirks |= ADIV5_AP_ACCESS_BANKED;
+		/* Configure the AP to put {DBGDTR{TX,RX},DBGITR,DBGDCSR} in banked data registers window */
+		adiv5_mem_access_setup(priv->base.ap, priv->base.base_addr + CORTEXAR_DBG_DTRTX, ALIGN_32BIT);
+		/* Selecting AP bank 1 to finish switching into banked mode */
+		adiv5_dp_write(priv->base.ap->dp, ADIV5_DP_SELECT, ((uint32_t)priv->base.ap->apsel << 24U) | 0x10U);
+	}
+}
+
+static bool cortexar_check_data_abort(target_s *const target, const uint32_t status)
+{
 	/* If the instruction triggered a synchronous data abort, signal failure having cleared it */
 	if (status & CORTEXAR_DBG_DSCR_SYNC_DATA_ABORT) {
 		cortexar_priv_s *const priv = (cortexar_priv_s *)target->priv;
@@ -402,49 +420,62 @@ static bool cortexar_run_insn(target_s *const target, const uint32_t insn)
 	return !(status & CORTEXAR_DBG_DSCR_SYNC_DATA_ABORT);
 }
 
+static bool cortexar_run_insn(target_s *const target, const uint32_t insn)
+{
+	const cortexar_priv_s *const priv = (const cortexar_priv_s *)target->priv;
+	/* Make sure we're in banked mode */
+	cortexar_banked_dcc_mode(target);
+	/* Issue the requested instruction to the core */
+	adiv5_dp_write(priv->base.ap->dp, ADIV5_AP_DB(CORTEXAR_BANKED_ITR), insn);
+	/* Poll for the instruction to complete */
+	uint32_t status = 0;
+	while (!(status & CORTEXAR_DBG_DSCR_INSN_COMPLETE))
+		status = adiv5_dp_read(priv->base.ap->dp, ADIV5_AP_DB(CORTEXAR_BANKED_DCSR));
+	/* Check if the instruction triggered a synchronous data abort */
+	return cortexar_check_data_abort(target, status);
+}
+
 static bool cortexar_run_read_insn(target_s *const target, const uint32_t insn, uint32_t *const result)
 {
+	const cortexar_priv_s *const priv = (const cortexar_priv_s *)target->priv;
+	/* Make sure we're in banked mode */
+	cortexar_banked_dcc_mode(target);
 	/* Issue the requested instruction to the core */
-	cortex_dbg_write32(target, CORTEXAR_DBG_ITR, insn);
+	adiv5_dp_write(priv->base.ap->dp, ADIV5_AP_DB(CORTEXAR_BANKED_ITR), insn);
 	/* Poll for the instruction to complete and the data to become ready in the DTR */
 	uint32_t status = 0;
 	while ((status & (CORTEXAR_DBG_DSCR_INSN_COMPLETE | CORTEXAR_DBG_DSCR_DTR_READ_READY)) !=
 		(CORTEXAR_DBG_DSCR_INSN_COMPLETE | CORTEXAR_DBG_DSCR_DTR_READ_READY)) {
-		status = cortex_dbg_read32(target, CORTEXAR_DBG_DSCR);
-		/* If the instruction triggered a synchronous data abort, signal failure having cleared it */
-		if (status & CORTEXAR_DBG_DSCR_SYNC_DATA_ABORT) {
-			cortexar_priv_s *const priv = (cortexar_priv_s *)target->priv;
-			priv->core_status |= CORTEXAR_STATUS_DATA_FAULT;
-			cortex_dbg_write32(target, CORTEXAR_DBG_DRCR, CORTEXAR_DBG_DRCR_CLR_STICKY_EXC);
+		status = adiv5_dp_read(priv->base.ap->dp, ADIV5_AP_DB(CORTEXAR_BANKED_DCSR));
+		/* Check if the instruction triggered a synchronous data abort */
+		if (!cortexar_check_data_abort(target, status))
 			return false;
-		}
 	}
 	/* Read back the DTR to complete the read and signal success */
-	*result = cortex_dbg_read32(target, CORTEXAR_DBG_DTRRX);
+	*result = adiv5_dp_read(priv->base.ap->dp, ADIV5_AP_DB(CORTEXAR_BANKED_DTRRX));
 	return true;
 }
 
 static bool cortexar_run_write_insn(target_s *const target, const uint32_t insn, const uint32_t data)
 {
+	const cortexar_priv_s *const priv = (const cortexar_priv_s *)target->priv;
+	/* Make sure we're in banked mode */
+	cortexar_banked_dcc_mode(target);
 	/* Set up the data in the DTR for the transaction */
-	cortex_dbg_write32(target, CORTEXAR_DBG_DTRTX, data);
+	adiv5_dp_write(priv->base.ap->dp, ADIV5_AP_DB(CORTEXAR_BANKED_DTRTX), data);
 	/* Poll for the data to become ready in the DTR */
-	while (!(cortex_dbg_read32(target, CORTEXAR_DBG_DSCR) & CORTEXAR_DBG_DSCR_DTR_WRITE_DONE))
+	while (!(adiv5_dp_read(priv->base.ap->dp, ADIV5_AP_DB(CORTEXAR_BANKED_DCSR)) & CORTEXAR_DBG_DSCR_DTR_WRITE_DONE))
 		continue;
 	/* Issue the requested instruction to the core */
-	cortex_dbg_write32(target, CORTEXAR_DBG_ITR, insn);
+	adiv5_dp_write(priv->base.ap->dp, ADIV5_AP_DB(CORTEXAR_BANKED_ITR), insn);
 	/* Poll for the instruction to complete and the data to be consumed from the DTR */
 	uint32_t status = 0;
 	while ((status & (CORTEXAR_DBG_DSCR_INSN_COMPLETE | CORTEXAR_DBG_DSCR_DTR_WRITE_DONE)) !=
 		CORTEXAR_DBG_DSCR_INSN_COMPLETE) {
-		status = cortex_dbg_read32(target, CORTEXAR_DBG_DSCR);
-		/* If the instruction triggered a synchronous data abort, signal failure having cleared it */
-		if (status & CORTEXAR_DBG_DSCR_SYNC_DATA_ABORT) {
-			cortexar_priv_s *const priv = (cortexar_priv_s *)target->priv;
-			priv->core_status |= CORTEXAR_STATUS_DATA_FAULT;
-			cortex_dbg_write32(target, CORTEXAR_DBG_DRCR, CORTEXAR_DBG_DRCR_CLR_STICKY_EXC);
+		status = adiv5_dp_read(priv->base.ap->dp, ADIV5_AP_DB(CORTEXAR_BANKED_DCSR));
+		/* Check if the instruction triggered a synchronous data abort */
+		if (!cortexar_check_data_abort(target, status))
 			return false;
-		}
 	}
 	return true;
 }
@@ -942,8 +973,37 @@ static bool cortexar_check_error(target_s *const target)
 }
 
 /* Fast path for cortexar_mem_read(). Assumes the address to read data from is already loaded in r0. */
-static inline bool cortexr_mem_read_fast(target_s *const target, uint32_t *const dest, const size_t count)
+static inline bool cortexar_mem_read_fast(target_s *const target, uint32_t *const dest, const size_t count)
 {
+	/* If we need to read more than a couple of uint32_t's, DCC Fast mode makes more sense, so use it. */
+	if (count > 2U) {
+		cortexar_priv_s *const priv = (cortexar_priv_s *)target->priv;
+		/* Make sure we're banked mode */
+		cortexar_banked_dcc_mode(target);
+		/* Switch into DCC Fast mode */
+		const uint32_t dbg_dcsr =
+			adiv5_dp_read(priv->base.ap->dp, ADIV5_AP_DB(CORTEXAR_BANKED_DCSR)) & ~CORTEXAR_DBG_DCSR_DCC_MASK;
+		adiv5_dp_write(priv->base.ap->dp, ADIV5_AP_DB(CORTEXAR_BANKED_DCSR), dbg_dcsr | CORTEXAR_DBG_DCSR_DCC_FAST);
+		/* Set up continual load so we can hammer the DTR */
+		adiv5_dp_write(priv->base.ap->dp, ADIV5_AP_DB(CORTEXAR_BANKED_ITR), ARM_LDC_R0_POSTINC4_DTRTX_INSN);
+		/* Run the transfer, hammering the DTR */
+		for (size_t offset = 0; offset < count; ++offset) {
+			/* Read the next value, which is the value for the last instruction run */
+			const uint32_t value = adiv5_dp_read(priv->base.ap->dp, ADIV5_AP_DB(CORTEXAR_BANKED_DTRRX));
+			/* If we've run the instruction at least once, store it */
+			if (offset)
+				dest[offset - 1U] = value;
+		}
+		/* Now read out the status from the DCSR in case anything went wrong */
+		const uint32_t status = adiv5_dp_read(priv->base.ap->dp, ADIV5_AP_DB(CORTEXAR_BANKED_DCSR));
+		/* Go back into DCC Normal (Non-blocking) mode */
+		adiv5_dp_write(priv->base.ap->dp, ADIV5_AP_DB(CORTEXAR_BANKED_DCSR), dbg_dcsr | CORTEXAR_DBG_DCSR_DCC_NORMAL);
+		/* Grab the value of the last instruction run now it won't run again */
+		dest[count - 1U] = adiv5_dp_read(priv->base.ap->dp, ADIV5_AP_DB(CORTEXAR_BANKED_DTRRX));
+		/* Check if the instruction triggered a synchronous data abort */
+		return cortexar_check_data_abort(target, status);
+	}
+
 	/* Read each of the uint32_t's checking for failure */
 	for (size_t offset = 0; offset < count; ++offset) {
 		if (!cortexar_run_read_insn(target, ARM_LDC_R0_POSTINC4_DTRTX_INSN, dest + offset))
@@ -953,7 +1013,7 @@ static inline bool cortexr_mem_read_fast(target_s *const target, uint32_t *const
 }
 
 /* Slow path for cortexar_mem_read(). Trashes r0 and r1. */
-static bool cortexr_mem_read_slow(target_s *const target, uint8_t *const data, target_addr_t addr, const size_t length)
+static bool cortexar_mem_read_slow(target_s *const target, uint8_t *const data, target_addr_t addr, const size_t length)
 {
 	size_t offset = 0;
 	/* If the address is odd, read a byte to get onto an even address */
@@ -971,7 +1031,7 @@ static bool cortexr_mem_read_slow(target_s *const target, uint8_t *const data, t
 		offset += 2U;
 	}
 	/* Use the fast path to read as much as possible before doing a slow path fixup at the end */
-	if (!cortexr_mem_read_fast(target, (uint32_t *)(data + offset), (length - offset) >> 2U))
+	if (!cortexar_mem_read_fast(target, (uint32_t *)(data + offset), (length - offset) >> 2U))
 		return false;
 	const uint8_t remainder = (length - offset) & 3U;
 	/* If the remainder needs at least 2 more bytes read, do this first */
@@ -990,7 +1050,7 @@ static bool cortexr_mem_read_slow(target_s *const target, uint8_t *const data, t
 	return true; /* Signal success */
 }
 
-static void cortexr_mem_handle_fault(target_s *const target, const char *const func)
+static void cortexar_mem_handle_fault(target_s *const target, const char *const func)
 {
 	const cortexar_priv_s *const priv = (cortexar_priv_s *)target->priv;
 	/* If we suffered a fault of some kind, grab the reason and restore DFSR/DFAR */
@@ -1012,7 +1072,7 @@ static void cortexr_mem_handle_fault(target_s *const target, const char *const f
  * NB: This requires the core to be halted! Uses instruction launches on
  * the core and requires we're in debug mode to work. Trashes r0.
  */
-static void cortexar_mem_read(target_s *const target, void *const dest, const target_addr_t src, const size_t len)
+static void cortexar_mem_read(target_s *const target, void *const dest, const target_addr64_t src, const size_t len)
 {
 	cortexar_priv_s *const priv = (cortexar_priv_s *)target->priv;
 	/* Cache DFSR and DFAR in case we wind up triggering a data fault */
@@ -1029,13 +1089,13 @@ static void cortexar_mem_read(target_s *const target, void *const dest, const ta
 
 	/* If the address is 32-bit aligned and we're reading 32 bits at a time, use the fast path */
 	if ((src & 3U) == 0U && (len & 3U) == 0U)
-		cortexr_mem_read_fast(target, (uint32_t *)dest, len >> 2U);
+		cortexar_mem_read_fast(target, (uint32_t *)dest, len >> 2U);
 	else
-		cortexr_mem_read_slow(target, (uint8_t *)dest, src, len);
+		cortexar_mem_read_slow(target, (uint8_t *)dest, src, len);
 	/* Deal with any data faults that occurred */
-	cortexr_mem_handle_fault(target, __func__);
+	cortexar_mem_handle_fault(target, __func__);
 
-	DEBUG_PROTO("%s: Reading %zu bytes @0x%" PRIx32 ":", __func__, len, src);
+	DEBUG_PROTO("%s: Reading %zu bytes @0x%" PRIx64 ":", __func__, len, src);
 #ifndef DEBUG_PROTO_IS_NOOP
 	const uint8_t *const data = (const uint8_t *)dest;
 #endif
@@ -1050,9 +1110,31 @@ static void cortexar_mem_read(target_s *const target, void *const dest, const ta
 }
 
 /* Fast path for cortexar_mem_write(). Assumes the address to read data from is already loaded in r0. */
-static inline bool cortexr_mem_write_fast(target_s *const target, const uint32_t *const src, const size_t count)
+static inline bool cortexar_mem_write_fast(target_s *const target, const uint32_t *const src, const size_t count)
 {
-	/* Read each of the uint32_t's checking for failure */
+	/* If we need to write more than a couple of uint32_t's, DCC Fast mode makes more sense, so use it. */
+	if (count > 2U) {
+		cortexar_priv_s *const priv = (cortexar_priv_s *)target->priv;
+		/* Make sure we're banked mode */
+		cortexar_banked_dcc_mode(target);
+		/* Switch into DCC Fast mode */
+		const uint32_t dbg_dcsr =
+			adiv5_dp_read(priv->base.ap->dp, ADIV5_AP_DB(CORTEXAR_BANKED_DCSR)) & ~CORTEXAR_DBG_DCSR_DCC_MASK;
+		adiv5_dp_write(priv->base.ap->dp, ADIV5_AP_DB(CORTEXAR_BANKED_DCSR), dbg_dcsr | CORTEXAR_DBG_DCSR_DCC_FAST);
+		/* Set up continual store so we can hammer the DTR */
+		adiv5_dp_write(priv->base.ap->dp, ADIV5_AP_DB(CORTEXAR_BANKED_ITR), ARM_STC_DTRRX_R0_POSTINC4_INSN);
+		/* Run the transfer, hammering the DTR */
+		for (size_t offset = 0; offset < count; ++offset)
+			adiv5_dp_write(priv->base.ap->dp, ADIV5_AP_DB(CORTEXAR_BANKED_DTRTX), src[offset]);
+		/* Now read out the status from the DCSR in case anything went wrong */
+		const uint32_t status = adiv5_dp_read(priv->base.ap->dp, ADIV5_AP_DB(CORTEXAR_BANKED_DCSR));
+		/* Go back into DCC Normal (Non-blocking) mode */
+		adiv5_dp_write(priv->base.ap->dp, ADIV5_AP_DB(CORTEXAR_BANKED_DCSR), dbg_dcsr | CORTEXAR_DBG_DCSR_DCC_NORMAL);
+		/* Check if the instruction triggered a synchronous data abort */
+		return cortexar_check_data_abort(target, status);
+	}
+
+	/* Write each of the uint32_t's checking for failure */
 	for (size_t offset = 0; offset < count; ++offset) {
 		if (!cortexar_run_write_insn(target, ARM_STC_DTRRX_R0_POSTINC4_INSN, src[offset]))
 			return false; /* Propagate failure if it happens */
@@ -1061,7 +1143,7 @@ static inline bool cortexr_mem_write_fast(target_s *const target, const uint32_t
 }
 
 /* Slow path for cortexar_mem_write(). Trashes r0 and r1. */
-static bool cortexr_mem_write_slow(
+static bool cortexar_mem_write_slow(
 	target_s *const target, target_addr_t addr, const uint8_t *const data, const size_t length)
 {
 	size_t offset = 0;
@@ -1080,7 +1162,7 @@ static bool cortexr_mem_write_slow(
 		offset += 2U;
 	}
 	/* Use the fast path to write as much as possible before doing a slow path fixup at the end */
-	if (!cortexr_mem_write_fast(target, (uint32_t *)(data + offset), (length - offset) >> 2U))
+	if (!cortexar_mem_write_fast(target, (uint32_t *)(data + offset), (length - offset) >> 2U))
 		return false;
 	const uint8_t remainder = (length - offset) & 3U;
 	/* If the remainder needs at least 2 more bytes write, do this first */
@@ -1105,10 +1187,10 @@ static bool cortexr_mem_write_slow(
  * the core and requires we're in debug mode to work. Trashes r0.
  */
 static void cortexar_mem_write(
-	target_s *const target, const target_addr_t dest, const void *const src, const size_t len)
+	target_s *const target, const target_addr64_t dest, const void *const src, const size_t len)
 {
 	cortexar_priv_s *const priv = (cortexar_priv_s *)target->priv;
-	DEBUG_PROTO("%s: Writing %zu bytes @0x%" PRIx32 ":", __func__, len, dest);
+	DEBUG_PROTO("%s: Writing %zu bytes @0x%" PRIx64 ":", __func__, len, dest);
 #ifndef DEBUG_PROTO_IS_NOOP
 	const uint8_t *const data = (const uint8_t *)src;
 #endif
@@ -1135,11 +1217,11 @@ static void cortexar_mem_write(
 
 	/* If the address is 32-bit aligned and we're writing 32 bits at a time, use the fast path */
 	if ((dest & 3U) == 0U && (len & 3U) == 0U)
-		cortexr_mem_write_fast(target, (const uint32_t *)src, len >> 2U);
+		cortexar_mem_write_fast(target, (const uint32_t *)src, len >> 2U);
 	else
-		cortexr_mem_write_slow(target, dest, (const uint8_t *)src, len);
+		cortexar_mem_write_slow(target, dest, (const uint8_t *)src, len);
 	/* Deal with any data faults that occurred */
-	cortexr_mem_handle_fault(target, __func__);
+	cortexar_mem_handle_fault(target, __func__);
 }
 
 static void cortexar_regs_read(target_s *const target, void *const data)
@@ -1198,31 +1280,31 @@ static size_t cortexar_reg_width(const size_t reg)
 	return 8U;
 }
 
-static ssize_t cortexar_reg_read(target_s *const target, const uint32_t reg, void *const data, const size_t max)
+static size_t cortexar_reg_read(target_s *const target, const uint32_t reg, void *const data, const size_t max)
 {
 	/* Try to get a pointer to the storage for the requested register, and return -1 if that fails */
 	const void *const reg_ptr = cortexar_reg_ptr(target, reg);
 	if (!reg_ptr)
-		return -1;
+		return 0;
 	/* Now we have a valid register, get its width in bytes, and check that against max */
 	const size_t reg_width = cortexar_reg_width(reg);
 	if (max < reg_width)
-		return -1;
+		return 0;
 	/* Finally, copy the register data out and return the width */
 	memcpy(data, reg_ptr, reg_width);
 	return reg_width;
 }
 
-static ssize_t cortexar_reg_write(target_s *const target, const uint32_t reg, const void *const data, const size_t max)
+static size_t cortexar_reg_write(target_s *const target, const uint32_t reg, const void *const data, const size_t max)
 {
 	/* Try to get a pointer to the storage for the requested register, and return -1 if that fails */
 	void *const reg_ptr = cortexar_reg_ptr(target, reg);
 	if (!reg_ptr)
-		return -1;
+		return 0;
 	/* Now we have a valid register, get its width in bytes, and check that against max */
 	const size_t reg_width = cortexar_reg_width(reg);
 	if (max < reg_width)
-		return -1;
+		return 0;
 	/* Finally, copy the new register data in and return the width */
 	memcpy(reg_ptr, data, reg_width);
 	return reg_width;
@@ -1271,23 +1353,23 @@ static void cortexar_reset(target_s *const target)
 
 static void cortexar_halt_request(target_s *const target)
 {
-	volatile exception_s error;
-	TRY_CATCH (error, EXCEPTION_TIMEOUT) {
+	TRY (EXCEPTION_TIMEOUT) {
 		cortex_dbg_write32(target, CORTEXAR_DBG_DRCR, CORTEXAR_DBG_DRCR_HALT_REQ);
 	}
-	if (error.type)
+	CATCH () {
+	default:
 		tc_printf(target, "Timeout sending interrupt, is target in WFI?\n");
+	}
 }
 
 static target_halt_reason_e cortexar_halt_poll(target_s *const target, target_addr_t *const watch)
 {
 	volatile uint32_t dscr = 0;
-	volatile exception_s error;
-	TRY_CATCH (error, EXCEPTION_ALL) {
+	TRY (EXCEPTION_ALL) {
 		/* If this times out because the target is in WFI then the target is still running. */
 		dscr = cortex_dbg_read32(target, CORTEXAR_DBG_DSCR);
 	}
-	switch (error.type) {
+	CATCH () {
 	case EXCEPTION_ERROR:
 		/* Things went seriously wrong and there is no recovery from this... */
 		target_list_free();
@@ -1346,6 +1428,7 @@ static target_halt_reason_e cortexar_halt_poll(target_s *const target, target_ad
 static void cortexar_halt_resume(target_s *const target, const bool step)
 {
 	cortexar_priv_s *const priv = (cortexar_priv_s *)target->priv;
+	priv->base.ap->dp->quirks &= ~ADIV5_AP_ACCESS_BANKED;
 	/* Restore the core's registers so the running program doesn't know we've been in there */
 	cortexar_regs_restore(target);
 

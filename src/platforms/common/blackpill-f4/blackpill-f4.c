@@ -51,7 +51,7 @@ void platform_init(void)
 	rcc_periph_clock_enable(RCC_GPIOB);
 	rcc_periph_clock_enable(RCC_CRC);
 
-#ifndef BMP_BOOTLOADER
+#ifndef BMD_BOOTLOADER
 	/* Blackpill board has a floating button on PA0. Pull it up and use as active-low. */
 	gpio_mode_setup(USER_BUTTON_KEY_PORT, GPIO_MODE_INPUT, GPIO_PUPD_PULLUP, USER_BUTTON_KEY_PIN);
 
@@ -72,6 +72,12 @@ void platform_init(void)
 		scb_reset_core();
 	}
 #endif
+
+	/* Unmap ST MaskROM and map back Internal Flash */
+	rcc_periph_clock_enable(RCC_SYSCFG);
+	if ((SYSCFG_MEMRM & 3U) == 1U)
+		SYSCFG_MEMRM &= ~3U;
+
 	rcc_clock_setup_pll(&rcc_hse_25mhz_3v3[PLATFORM_CLOCK_FREQ]);
 
 	/* Set up DM/DP pins. PA9/PA10 are not routed to USB-C. */
@@ -132,7 +138,7 @@ bool platform_nrst_get_val(void)
 
 const char *platform_target_voltage(void)
 {
-	return NULL;
+	return "Unknown";
 }
 
 /*

@@ -53,16 +53,14 @@
 */
 
 #include "general.h"
-#include "gdb_if.h"
 #include "adiv5.h"
 
-#include <assert.h>
 #include <string.h>
+#ifndef _MSC_VER
 #include <unistd.h>
-#include <stdlib.h>
-#include <signal.h>
-#include <ctype.h>
 #include <sys/time.h>
+#endif
+#include <stdlib.h>
 #include <hidapi.h>
 #include <wchar.h>
 #include <sys/stat.h>
@@ -71,11 +69,8 @@
 #include "dap.h"
 #include "dap_command.h"
 #include "cmsis_dap.h"
-#include "buffer_utils.h"
 
-#include "cli.h"
 #include "target.h"
-#include "target_internal.h"
 
 #define TRANSFER_TIMEOUT_MS (100)
 
@@ -512,7 +507,13 @@ static ssize_t dap_run_cmd_raw(const uint8_t *const request_data, const size_t r
 		DEBUG_WIRE("%02x ", request_data[i]);
 	DEBUG_WIRE("\n");
 
-	uint8_t data[65];
+	/* Provide enough space for up to a HS USB HID payload */
+	uint8_t data[1024];
+	/* Make sure that we're not about to blow this buffer when we request data back */
+	if (sizeof(data) < packet_size) {
+		DEBUG_ERROR("CMSIS-DAP request would exceed response buffer\n");
+		return -1;
+	}
 
 	ssize_t response = -1;
 	if (type == CMSIS_TYPE_HID)
@@ -539,15 +540,17 @@ bool dap_run_cmd(const void *const request_data, const size_t request_length, vo
 	/* This subtracts one off the result to account for the command byte that gets stripped above */
 	const ssize_t result =
 		dap_run_cmd_raw((const uint8_t *)request_data, request_length, (uint8_t *)response_data, response_length) - 1U;
+	if (result < 0)
+		return false;
 	return (size_t)result >= response_length;
 }
 
-static void dap_mem_read(adiv5_access_port_s *ap, void *dest, uint32_t src, size_t len)
+static void dap_mem_read(adiv5_access_port_s *ap, void *dest, target_addr64_t src, size_t len)
 {
 	if (len == 0)
 		return;
 	const align_e align = MIN_ALIGN(src, len);
-	DEBUG_WIRE("dap_mem_read @ %" PRIx32 " len %zu, align %d\n", src, len, align);
+	DEBUG_PROBE("dap_mem_read @ %" PRIx64 " len %zu, align %d\n", src, len, align);
 	/* If the read can be done in a single transaction, use the dap_read_single() fast-path */
 	if ((1U << align) == len) {
 		dap_read_single(ap, dest, src, align);
@@ -571,7 +574,7 @@ static void dap_mem_read(adiv5_access_port_s *ap, void *dest, uint32_t src, size
 			/* blocks - i gives how many blocks are left to transfer in this 1024 byte chunk */
 			const size_t transfer_length = MIN(blocks - i, blocks_per_transfer) << align;
 			if (!dap_read_block(ap, data + offset, src + offset, transfer_length, align)) {
-				DEBUG_WIRE("mem_read failed: %u\n", ap->dp->fault);
+				DEBUG_WIRE("dap_mem_read failed: %u\n", ap->dp->fault);
 				return;
 			}
 			offset += transfer_length;
@@ -580,11 +583,11 @@ static void dap_mem_read(adiv5_access_port_s *ap, void *dest, uint32_t src, size
 	DEBUG_WIRE("dap_mem_read transferred %zu blocks\n", len >> align);
 }
 
-static void dap_mem_write(adiv5_access_port_s *ap, uint32_t dest, const void *src, size_t len, align_e align)
+static void dap_mem_write(adiv5_access_port_s *ap, target_addr64_t dest, const void *src, size_t len, align_e align)
 {
 	if (len == 0)
 		return;
-	DEBUG_WIRE("memwrite @ %" PRIx32 " len %zu, align %d\n", dest, len, align);
+	DEBUG_PROBE("dap_mem_write @ %" PRIx64 " len %zu, align %d\n", dest, len, align);
 	/* If the write can be done in a single transaction, use the dap_write_single() fast-path */
 	if ((1U << align) == len) {
 		dap_write_single(ap, dest, src, align);
@@ -608,13 +611,13 @@ static void dap_mem_write(adiv5_access_port_s *ap, uint32_t dest, const void *sr
 			/* blocks - i gives how many blocks are left to transfer in this 1024 byte chunk */
 			const size_t transfer_length = MIN(blocks - i, blocks_per_transfer) << align;
 			if (!dap_write_block(ap, dest + offset, data + offset, transfer_length, align)) {
-				DEBUG_WIRE("mem_write failed: %u\n", ap->dp->fault);
+				DEBUG_WIRE("dap_mem_write failed: %u\n", ap->dp->fault);
 				return;
 			}
 			offset += transfer_length;
 		}
 	}
-	DEBUG_WIRE("dap_mem_write_sized transferred %zu blocks\n", len >> align);
+	DEBUG_WIRE("dap_dap_mem_write transferred %zu blocks\n", len >> align);
 
 	/* Make sure this write is complete by doing a dummy read */
 	adiv5_dp_read(ap->dp, ADIV5_DP_RDBUFF);

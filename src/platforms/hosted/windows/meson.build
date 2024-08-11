@@ -52,3 +52,5 @@ libftdi = declare_dependency(
 	include_directories: ftdi_includes,
 	dependencies: ftdi_dep
 )
+
+subdir('getopt')

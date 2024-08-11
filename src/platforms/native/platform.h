@@ -38,11 +38,12 @@ extern bool debug_bmp;
 #define PLATFORM_IDENT   ""
 #define UPD_IFACE_STRING "@Internal Flash   /0x08000000/8*001Kg"
 
+extern int hwversion;
 /*
  * Hardware version switcher helper - when the hardware
  * version is smaller than ver it outputs opt1, otherwise opt2
  */
-#define HW_SWITCH(ver, opt1, opt2) (platform_hwversion() < (ver) ? (opt1) : (opt2))
+#define HW_SWITCH(ver, opt1, opt2) (hwversion < (ver) ? (opt1) : (opt2))
 
 /*
  * Important pin mappings for native implementation:
@@ -142,8 +143,12 @@ extern bool debug_bmp;
 #define TPWR_PORT   GPIOB
 #define TPWR_PIN    GPIO0
 
+/* USB pin definitions */
 #define USB_PU_PORT GPIOA
+#define USB_PORT    GPIOA
 #define USB_PU_PIN  GPIO8
+#define USB_DP_PIN  GPIO12
+#define USB_DM_PIN  GPIO11
 
 /* For HW Rev 4 and older */
 #define USB_VBUS_PORT GPIOB

@@ -21,14 +21,14 @@
  * along with this program.  If not, see <http://www.gnu.org/licenses/>.
  */
 #include "general.h"
-#include "gdb_if.h"
-#include "target.h"
 #include "buffer_utils.h"
 
 #include <assert.h>
 #include <string.h>
+#ifndef _MSC_VER
 #include <unistd.h>
 #include <sys/time.h>
+#endif
 
 #include "ftdi_bmp.h"
 #include <ftdi.h>
@@ -823,7 +823,7 @@ const char *ftdi_target_voltage(void)
 			return "Present";
 		return "Absent";
 	}
-	return NULL;
+	return "Unknown";
 }
 
 static uint16_t divisor;

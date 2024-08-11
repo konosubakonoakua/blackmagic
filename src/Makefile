@@ -4,6 +4,11 @@ VPATH += $(PLATFORM_DIR) target
 ENABLE_DEBUG ?= 0
 ENABLE_CORTEXAR ?= 0
 ENABLE_RISCV ?= 0
+ENABLE_ARTERY ?= 0
+ENABLE_CH579 ?= 0
+ENABLE_PUYA ?= 0
+ENABLE_XILINX ?= 0
+ENABLE_RISCV_ACCEL ?= 0
 
 SYS = $(shell $(CC) -dumpmachine)
 
@@ -35,14 +40,12 @@ SRC =              \
 	adiv5.c        \
 	adiv5_jtag.c   \
 	adiv5_swd.c    \
-	at32f43x.c     \
 	command.c      \
 	cortex.c       \
 	cortexm.c      \
 	crc32.c        \
 	efm32.c        \
 	exception.c    \
-	gdb_if.c       \
 	gdb_main.c     \
 	gdb_packet.c   \
 	gdb_reg.c      \
@@ -78,6 +81,7 @@ SRC =              \
 	semihosting.c  \
 	sfdp.c         \
 	spi.c          \
+	s32k3xx.c      \
 	stm32f1.c      \
 	ch32f1.c       \
 	stm32f4.c      \
@@ -87,29 +91,58 @@ SRC =              \
 	stm32l0.c      \
 	stm32l4.c      \
 	stm32g0.c      \
+	stm32_common.c \
 	renesas_ra.c   \
 	target.c       \
 	target_flash.c \
-	target_probe.c \
-	zynq7000.c
+	target_probe.c
+
+ifneq ($(PROBE_HOST), ctxLink)
+	SRC += gdb_if.c
+endif
 
 ifeq (,$(filter all_platforms,$(MAKECMDGOALS)))
 include $(PLATFORM_DIR)/Makefile.inc
 endif
 
+ifeq ($(ENABLE_PUYA), 1)
+SRC +=     \
+	puya.c
+endif
+
+ifeq ($(ENABLE_CH579), 1)
+SRC +=     \
+	ch579.c
+endif
+
+ifeq ($(ENABLE_ARTERY), 1)
+SRC +=     \
+	at32f43x.c
+endif
+
 ifeq ($(ENABLE_CORTEXAR), 1)
-CFLAGS += -DENABLE_CORTEXAR
+CFLAGS += -DENABLE_CORTEXAR=1
 SRC +=           \
 	cortexar.c   \
 	renesas_rz.c
+
+ifeq ($(ENABLE_XILINX), 1)
+CFLAGS += -DENABLE_XILINX=1
+SRC +=         \
+	zynq7000.c
+endif
 endif
 
 ifeq ($(ENABLE_RISCV), 1)
-CFLAGS += -DENABLE_RISCV
+CFLAGS += -DENABLE_RISCV=1
 SRC +=               \
 	riscv32.c        \
 	riscv64.c        \
 	riscv_debug.c    \
+	riscv_jtag_dtm.c
+else ifeq ($(ENABLE_RISCV_ACCEL), 1)
+CFLAGS == -DENABLE_RISCV_ACCEL=1
+SRC +=               \
 	riscv_jtag_dtm.c
 endif
 

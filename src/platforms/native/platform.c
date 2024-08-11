@@ -26,6 +26,7 @@
 #include "aux_serial.h"
 #include "morse.h"
 
+#include <libopencm3/cm3/vector.h>
 #include <libopencm3/stm32/rcc.h>
 #include <libopencm3/cm3/scb.h>
 #include <libopencm3/cm3/scs.h>
@@ -38,12 +39,10 @@
 #include <libopencm3/stm32/spi.h>
 #include <libopencm3/stm32/flash.h>
 #include <libopencm3/stm32/timer.h>
+#include <libopencm3/cm3/systick.h>
 
 static void adc_init(void);
 static void setup_vbus_irq(void);
-
-/* This is defined by the linker script */
-extern char vector_table;
 
 #define TPWR_SOFT_START_STEPS 64U
 
@@ -60,6 +59,8 @@ extern char vector_table;
  * work on the newer hardware.
  */
 #define BMP_HWVERSION_BYTE FLASH_OPTION_BYTE_2
+
+int hwversion = -1;
 
 /*
  * Pins PB[7:5] are used to detect hardware revision.
@@ -81,9 +82,8 @@ extern char vector_table;
  * inverse of the lower byte unless the byte is not set, then all bits in both
  * high and low byte are 0xff.
  */
-int platform_hwversion(void)
+static int platform_hwversion_init(void)
 {
-	static int hwversion = -1;
 	uint16_t hwversion_pins = GPIO7 | GPIO6 | GPIO5;
 	uint16_t unused_pins = hwversion_pins ^ 0xffffU;
 
@@ -143,7 +143,7 @@ int platform_hwversion(void)
 
 void platform_init(void)
 {
-	const int hwversion = platform_hwversion();
+	const int hwversion = platform_hwversion_init();
 	SCS_DEMCR |= SCS_DEMCR_VC_MON_EN;
 
 	rcc_clock_setup_pll(&rcc_hse_configs[RCC_CLOCK_HSE8_72MHZ]);
@@ -277,10 +277,15 @@ void platform_init(void)
 	setup_vbus_irq();
 }
 
+int platform_hwversion(void)
+{
+	return hwversion;
+}
+
 void platform_nrst_set_val(bool assert)
 {
 	gpio_set(TMS_PORT, TMS_PIN);
-	if (platform_hwversion() == 0 || platform_hwversion() >= 3)
+	if (hwversion == 0 || hwversion >= 3)
 		gpio_set_val(NRST_PORT, NRST_PIN, assert);
 	else
 		gpio_set_val(NRST_PORT, NRST_PIN, !assert);
@@ -293,16 +298,16 @@ void platform_nrst_set_val(bool assert)
 
 bool platform_nrst_get_val(void)
 {
-	if (platform_hwversion() == 0)
+	if (hwversion == 0)
 		return gpio_get(NRST_SENSE_PORT, NRST_SENSE_PIN) == 0;
-	if (platform_hwversion() >= 3)
+	if (hwversion >= 3)
 		return gpio_get(NRST_SENSE_PORT, NRST_SENSE_PIN) != 0;
 	return gpio_get(NRST_PORT, NRST_PIN) == 0;
 }
 
 bool platform_target_get_power(void)
 {
-	if (platform_hwversion() > 0)
+	if (hwversion > 0)
 		return !gpio_get(PWR_BR_PORT, PWR_BR_PIN);
 	return false;
 }
@@ -316,7 +321,7 @@ static inline void platform_wait_pwm_cycle()
 
 bool platform_target_set_power(const bool power)
 {
-	if (platform_hwversion() <= 0)
+	if (hwversion <= 0)
 		return false;
 	/* If we're on hw1 or newer, and are turning the power on */
 	if (power) {
@@ -340,7 +345,7 @@ bool platform_target_set_power(const bool power)
 	 * reset state timer for the next request
 	 */
 	if (power) {
-		if (platform_hwversion() == 1)
+		if (hwversion == 1)
 			gpio_set_mode(PWR_BR_PORT, GPIO_MODE_INPUT, GPIO_CNF_INPUT_PULL_UPDOWN, PWR_BR_PIN);
 		else
 			gpio_set_mode(PWR_BR_PORT, GPIO_MODE_OUTPUT_50_MHZ, GPIO_CNF_OUTPUT_OPENDRAIN, PWR_BR_PIN);
@@ -380,7 +385,7 @@ uint32_t platform_target_voltage_sense(void)
 	 * This function is only needed for implementations that allow the
 	 * target to be powered from the debug probe
 	 */
-	if (platform_hwversion() == 0)
+	if (hwversion == 0)
 		return 0;
 
 	uint8_t channel = 8;
@@ -400,8 +405,8 @@ uint32_t platform_target_voltage_sense(void)
 
 const char *platform_target_voltage(void)
 {
-	if (platform_hwversion() == 0)
-		return gpio_get(GPIOB, GPIO0) ? "OK" : "ABSENT!";
+	if (hwversion == 0)
+		return gpio_get(GPIOB, GPIO0) ? "Present" : "Absent";
 
 	static char ret[] = "0.0V";
 	uint32_t val = platform_target_voltage_sense();
@@ -415,6 +420,15 @@ void platform_request_boot(void)
 {
 	/* Disconnect USB cable */
 	gpio_set_mode(USB_PU_PORT, GPIO_MODE_INPUT, GPIO_CNF_INPUT_FLOAT, USB_PU_PIN);
+	gpio_set_mode(USB_PORT, GPIO_MODE_INPUT, GPIO_CNF_INPUT_PULL_UPDOWN, USB_DP_PIN | USB_DM_PIN);
+	gpio_clear(USB_PORT, USB_DP_PIN | USB_DM_PIN);
+	/* Make sure we drive the USB reset condition for at least 10ms */
+	while (!(STK_CSR & STK_CSR_COUNTFLAG))
+		continue;
+	for (size_t count = 0U; count < 10U * SYSTICKMS; ++count) {
+		while (!(STK_CSR & STK_CSR_COUNTFLAG))
+			continue;
+	}
 
 	/* Drive boot request pin */
 	gpio_set_mode(GPIOB, GPIO_MODE_OUTPUT_2_MHZ, GPIO_CNF_OUTPUT_PUSHPULL, GPIO12);
@@ -423,7 +437,7 @@ void platform_request_boot(void)
 
 void platform_target_clk_output_enable(bool enable)
 {
-	if (platform_hwversion() >= 6) {
+	if (hwversion >= 6) {
 		/* If we're switching to tristate mode, first convert the processor pin to an input */
 		if (!enable)
 			gpio_set_mode(TCK_PORT, GPIO_MODE_INPUT, GPIO_CNF_INPUT_FLOAT, TCK_PIN);
@@ -507,7 +521,7 @@ void exti15_10_isr(void)
 	uint32_t usb_vbus_port;
 	uint16_t usb_vbus_pin;
 
-	if (platform_hwversion() < 5) {
+	if (hwversion < 5) {
 		usb_vbus_port = USB_VBUS_PORT;
 		usb_vbus_pin = USB_VBUS_PIN;
 	} else {
@@ -530,7 +544,7 @@ static void setup_vbus_irq(void)
 	uint32_t usb_vbus_port;
 	uint16_t usb_vbus_pin;
 
-	if (platform_hwversion() < 5) {
+	if (hwversion < 5) {
 		usb_vbus_port = USB_VBUS_PORT;
 		usb_vbus_pin = USB_VBUS_PIN;
 	} else {

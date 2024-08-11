@@ -34,16 +34,21 @@
 #include "target_internal.h"
 #include "morse.h"
 #include "version.h"
-#include "serialno.h"
 #include "jtagtap.h"
+
+#if PC_HOSTED == 0
 #include "jtag_scan.h"
+#endif
 
 #ifdef ENABLE_RTT
 #include "rtt.h"
+#include "hex_utils.h"
 #endif
 
 #ifdef PLATFORM_HAS_TRACESWO
+#include "serialno.h"
 #include "traceswo.h"
+#include "usb.h"
 #endif
 
 static bool cmd_version(target_s *t, int argc, const char **argv);
@@ -74,6 +79,10 @@ static bool cmd_debug_bmp(target_s *t, int argc, const char **argv);
 #endif
 #if PC_HOSTED == 1
 static bool cmd_shutdown_bmda(target_s *t, int argc, const char **argv);
+#endif
+
+#ifdef _MSC_VER
+#define strtok_r strtok_s
 #endif
 
 const command_s cmd_list[] = {
@@ -116,6 +125,10 @@ const command_s cmd_list[] = {
 	{NULL, NULL, NULL},
 };
 
+#ifdef PLATFORM_HAS_CUSTOM_COMMANDS
+extern const command_s platform_cmd_list[];
+#endif
+
 bool connect_assert_nrst;
 #if defined(PLATFORM_HAS_DEBUG) && PC_HOSTED == 0
 bool debug_bmp;
@@ -151,6 +164,13 @@ int command_process(target_s *const t, char *const cmd_buffer)
 		if ((argc == 0) || !strncmp(argv[0], cmd->cmd, strlen(argv[0])))
 			return !cmd->handler(t, argc, argv);
 	}
+
+#ifdef PLATFORM_HAS_CUSTOM_COMMANDS
+	for (const command_s *cmd = platform_cmd_list; cmd->cmd; ++cmd) {
+		if (!strncmp(argv[0], cmd->cmd, strlen(argv[0])))
+			return !cmd->handler(t, argc, argv);
+	}
+#endif
 
 	if (!t)
 		return -1;
@@ -189,6 +209,10 @@ bool cmd_help(target_s *t, int argc, const char **argv)
 		gdb_out("General commands:\n");
 		for (const command_s *cmd = cmd_list; cmd->cmd; cmd++)
 			gdb_outf("\t%s -- %s\n", cmd->cmd, cmd->help);
+#ifdef PLATFORM_HAS_CUSTOM_COMMANDS
+		for (const command_s *cmd = platform_cmd_list; cmd->cmd; ++cmd)
+			gdb_outf("\t%s -- %s\n", cmd->cmd, cmd->help);
+#endif
 		if (!t)
 			return true;
 	}
@@ -203,27 +227,25 @@ static bool cmd_jtag_scan(target_s *target, int argc, const char **argv)
 	(void)argc;
 	(void)argv;
 
-	if (platform_target_voltage())
-		gdb_outf("Target voltage: %s\n", platform_target_voltage());
+	gdb_outf("Target voltage: %s\n", platform_target_voltage());
 
 	if (connect_assert_nrst)
 		platform_nrst_set_val(true); /* will be deasserted after attach */
 
 	bool scan_result = false;
-	volatile exception_s e;
-	TRY_CATCH (e, EXCEPTION_ALL) {
+	TRY (EXCEPTION_ALL) {
 #if PC_HOSTED == 1
 		scan_result = bmda_jtag_scan();
 #else
 		scan_result = jtag_scan();
 #endif
 	}
-	switch (e.type) {
+	CATCH () {
 	case EXCEPTION_TIMEOUT:
 		gdb_outf("Timeout during scan. Is target stuck in WFI?\n");
 		break;
 	case EXCEPTION_ERROR:
-		gdb_outf("Exception: %s\n", e.msg);
+		gdb_outf("Exception: %s\n", exception_frame.msg);
 		break;
 	}
 
@@ -246,27 +268,25 @@ bool cmd_swd_scan(target_s *target, int argc, const char **argv)
 	volatile uint32_t targetid = 0;
 	if (argc > 1)
 		targetid = strtoul(argv[1], NULL, 0);
-	if (platform_target_voltage())
-		gdb_outf("Target voltage: %s\n", platform_target_voltage());
+	gdb_outf("Target voltage: %s\n", platform_target_voltage());
 
 	if (connect_assert_nrst)
 		platform_nrst_set_val(true); /* will be deasserted after attach */
 
 	bool scan_result = false;
-	volatile exception_s e;
-	TRY_CATCH (e, EXCEPTION_ALL) {
+	TRY (EXCEPTION_ALL) {
 #if PC_HOSTED == 1
 		scan_result = bmda_swd_scan(targetid);
 #else
 		scan_result = adiv5_swd_scan(targetid);
 #endif
 	}
-	switch (e.type) {
+	CATCH () {
 	case EXCEPTION_TIMEOUT:
 		gdb_outf("Timeout during scan. Is target stuck in WFI?\n");
 		break;
 	case EXCEPTION_ERROR:
-		gdb_outf("Exception: %s\n", e.msg);
+		gdb_outf("Exception: %s\n", exception_frame.msg);
 		break;
 	}
 
@@ -289,39 +309,36 @@ bool cmd_auto_scan(target_s *t, int argc, const char **argv)
 	(void)argc;
 	(void)argv;
 
-	if (platform_target_voltage())
-		gdb_outf("Target voltage: %s\n", platform_target_voltage());
+	gdb_outf("Target voltage: %s\n", platform_target_voltage());
+
 	if (connect_assert_nrst)
 		platform_nrst_set_val(true); /* will be deasserted after attach */
 
 	bool scan_result = false;
-	volatile exception_s e;
-	TRY_CATCH (e, EXCEPTION_ALL) {
+	TRY (EXCEPTION_ALL) {
 #if PC_HOSTED == 1
 		scan_result = bmda_jtag_scan();
 #else
 		scan_result = jtag_scan();
 #endif
-		if (scan_result)
-			break;
-		gdb_out("JTAG scan found no devices, trying SWD!\n");
+		if (!scan_result) {
+			gdb_out("JTAG scan found no devices, trying SWD!\n");
 
 #if PC_HOSTED == 1
-		scan_result = bmda_swd_scan(0);
+			scan_result = bmda_swd_scan(0);
 #else
-		scan_result = adiv5_swd_scan(0);
+			scan_result = adiv5_swd_scan(0);
 #endif
-		if (scan_result)
-			break;
-
-		gdb_out("SWD scan found no devices.\n");
+			if (!scan_result)
+				gdb_out("SWD scan found no devices.\n");
+		}
 	}
-	switch (e.type) {
+	CATCH () {
 	case EXCEPTION_TIMEOUT:
 		gdb_outf("Timeout during scan. Is target stuck in WFI?\n");
 		break;
 	case EXCEPTION_ERROR:
-		gdb_outf("Exception: %s\n", e.msg);
+		gdb_outf("Exception: %s\n", exception_frame.msg);
 		break;
 	}
 
@@ -360,22 +377,22 @@ bool cmd_frequency(target_s *t, int argc, const char **argv)
 	}
 	const uint32_t freq = platform_max_frequency_get();
 	if (freq == FREQ_FIXED)
-		gdb_outf("SWJ freq fixed\n");
+		gdb_outf("Debug iface frequency is fixed.\n");
 	else
-		gdb_outf("Current SWJ freq %" PRIu32 "Hz\n", freq);
+		gdb_outf("Debug iface frequency set to %" PRIu32 "Hz\n", freq);
 	return true;
 }
 
 static void display_target(size_t idx, target_s *target, void *context)
 {
 	(void)context;
-	const char attached = target_attached(target) ? '*' : ' ';
-	const char *const core_name = target_core_name(target);
-	if (!strcmp(target_driver_name(target), "ARM Cortex-M"))
-		gdb_outf("***%2u %c Unknown %s Designer 0x%x Part ID 0x%x %s\n", (unsigned)idx, attached,
-			target_driver_name(target), target_designer(target), target_part_id(target), core_name ? core_name : "");
+	const char attached = target->attached ? '*' : ' ';
+	const char *const core_name = target->core;
+	if (!strcmp(target->driver, "ARM Cortex-M"))
+		gdb_outf("***%2u %c Unknown %s Designer 0x%x Part ID 0x%x %s\n", (unsigned)idx, attached, target->driver,
+			target->designer_code, target->part_id, core_name ? core_name : "");
 	else
-		gdb_outf("%2u %3c  %s %s\n", (unsigned)idx, attached, target_driver_name(target), core_name ? core_name : "");
+		gdb_outf("%2u %3c  %s %s\n", (unsigned)idx, attached, target->driver, core_name ? core_name : "");
 }
 
 bool cmd_targets(target_s *target, int argc, const char **argv)
@@ -567,11 +584,12 @@ static bool cmd_rtt(target_s *t, int argc, const char **argv)
 	} else if (argc == 2 && strncmp(argv[1], "ram", command_len) == 0)
 		rtt_flag_ram = false;
 	else if (argc == 4 && strncmp(argv[1], "ram", command_len) == 0) {
-		const int cnt1 = sscanf(argv[2], "%" SCNx32, &rtt_ram_start);
-		const int cnt2 = sscanf(argv[3], "%" SCNx32, &rtt_ram_end);
-		rtt_flag_ram = cnt1 == 1 && cnt2 == 1 && rtt_ram_end > rtt_ram_start;
-		if (!rtt_flag_ram)
-			gdb_out("address?\n");
+		if (read_hex32(argv[2], NULL, &rtt_ram_start, READ_HEX_NO_FOLLOW) &&
+			read_hex32(argv[3], NULL, &rtt_ram_end, READ_HEX_NO_FOLLOW)) {
+			rtt_flag_ram = rtt_ram_end > rtt_ram_start;
+			if (!rtt_flag_ram)
+				gdb_out("address?\n");
+		}
 	} else if (argc == 5 && strncmp(argv[1], "poll", command_len) == 0) {
 		/* set polling params */
 		rtt_max_poll_ms = strtoul(argv[2], NULL, 0);
@@ -584,9 +602,8 @@ static bool cmd_rtt(target_s *t, int argc, const char **argv)
 #endif
 
 #ifdef PLATFORM_HAS_TRACESWO
-static bool cmd_traceswo(target_s *t, int argc, const char **argv)
+static bool cmd_traceswo_enable(int argc, const char **argv)
 {
-	(void)t;
 #if TRACESWO_PROTOCOL == 2
 	uint32_t baudrate = SWO_DEFAULT_BAUD;
 #endif
@@ -631,8 +648,37 @@ static bool cmd_traceswo(target_s *t, int argc, const char **argv)
 	traceswo_init(swo_channelmask);
 #endif
 
-	gdb_outf("Trace enabled for BMP serial %s, USB EP 5\n", serial_no);
+	gdb_outf("Trace enabled for BMP serial %s, USB EP %u\n", serial_no, TRACE_ENDPOINT);
 	return true;
+}
+
+static bool cmd_traceswo_disable(void)
+{
+#if TRACESWO_PROTOCOL == 2
+	traceswo_deinit();
+	gdb_out("Trace disabled\n");
+	return true;
+#else
+	gdb_out("Not implemented\n");
+	return false;
+#endif
+}
+
+static bool cmd_traceswo(target_s *t, int argc, const char **argv)
+{
+	(void)t;
+	bool mode = false;
+	if (argc >= 2) {
+		if (!parse_enable_or_disable(argv[1], &mode)) {
+			gdb_out("Usage: traceswo <enable|disable> [2000000] [decode [0 1 3 31]]\n");
+			return false;
+		}
+	}
+	if (mode) {
+		return cmd_traceswo_enable(argc - 1, argv + 1);
+	} else {
+		return cmd_traceswo_disable();
+	}
 }
 #endif
 

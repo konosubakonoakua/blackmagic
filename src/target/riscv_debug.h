@@ -214,9 +214,27 @@ typedef struct riscv_hart {
 #define RV_CSR_MTVAL      0x343
 #define RV_CSR_MIP        0x344
 
+// These two lines are about allowing gdb to access
+// fpu registers through fake registers offset by
+// RV_FPU_GDB_OFFSET for normal fpu registers
+// and RV_FPU_GDB_CSR_OFFSET (for fpu related CSR)
+#define RV_FPU_GDB_OFFSET     33
+#define RV_FPU_GDB_CSR_OFFSET 66
+
+/* JTAG DTM function declarations */
+#ifdef ENABLE_RISCV
 void riscv_jtag_dtm_handler(uint8_t dev_index);
+#endif
+bool riscv_jtag_dmi_read(riscv_dmi_s *dmi, uint32_t address, uint32_t *value);
+bool riscv_jtag_dmi_write(riscv_dmi_s *dmi, uint32_t address, uint32_t value);
+
 void riscv_dmi_init(riscv_dmi_s *dmi);
 riscv_hart_s *riscv_hart_struct(target_s *target);
+
+#if PC_HOSTED == 1
+/* BMDA interposition functions for DP setup */
+void bmda_riscv_jtag_dtm_init(riscv_dmi_s *dmi);
+#endif
 
 bool riscv_dm_read(riscv_dm_s *dbg_module, uint8_t address, uint32_t *value);
 bool riscv_dm_write(riscv_dm_s *dbg_module, uint8_t address, uint32_t value);
@@ -227,11 +245,14 @@ riscv_match_size_e riscv_breakwatch_match_size(size_t size);
 bool riscv_config_trigger(
 	riscv_hart_s *hart, uint32_t trigger, riscv_trigger_state_e mode, const void *config, const void *address);
 
+bool riscv_attach(target_s *target);
+void riscv_detach(target_s *target);
+
 uint8_t riscv_mem_access_width(const riscv_hart_s *hart, target_addr_t address, size_t length);
 void riscv32_unpack_data(void *dest, uint32_t data, uint8_t access_width);
 uint32_t riscv32_pack_data(const void *src, uint8_t access_width);
 
-void riscv32_mem_read(target_s *target, void *dest, target_addr_t src, size_t len);
-void riscv32_mem_write(target_s *target, target_addr_t dest, const void *src, size_t len);
+void riscv32_mem_read(target_s *target, void *dest, target_addr64_t src, size_t len);
+void riscv32_mem_write(target_s *target, target_addr64_t dest, const void *src, size_t len);
 
 #endif /*TARGET_RISCV_DEBUG_H*/

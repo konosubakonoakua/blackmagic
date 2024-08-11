@@ -24,8 +24,15 @@
 #include "command.h"
 
 #include <stdarg.h>
-#include <unistd.h>
 #include <assert.h>
+
+#ifndef _MSC_VER
+#include <unistd.h>
+#endif
+
+#if PC_HOSTED == 1
+#include "platform.h"
+#endif
 
 /* Fixup for when _FILE_OFFSET_BITS == 64 as unistd.h screws this up for us */
 #if defined(lseek)
@@ -105,11 +112,19 @@ void target_mem_map_free(target_s *target)
 
 void target_list_free(void)
 {
-	target_s *target = target_list;
+	target_s *volatile target = target_list;
 	while (target) {
 		target_s *next_target = target->next;
-		if (target->attached)
-			target->detach(target);
+		TRY (EXCEPTION_ALL) {
+			if (target->attached)
+				target->detach(target);
+		}
+		CATCH () {
+		default:
+			DEBUG_ERROR("Exception caught while detaching from target: %s\n", exception_frame.msg);
+			target->attached = false;
+			break;
+		}
 		if (target->tc && target->tc->destroy_callback)
 			target->tc->destroy_callback(target->tc, target);
 		if (target->priv)
@@ -180,7 +195,12 @@ target_s *target_attach(target_s *target, target_controller_s *controller)
 	return target;
 }
 
-void target_add_ram(target_s *target, target_addr_t start, uint32_t len)
+void target_add_ram32(target_s *const target, const target_addr32_t start, const uint32_t len)
+{
+	target_add_ram64(target, start, len);
+}
+
+void target_add_ram64(target_s *const target, const target_addr64_t start, const uint64_t len)
 {
 	target_ram_s *ram = malloc(sizeof(*ram));
 	if (!ram) { /* malloc failed: heap exhaustion */
@@ -271,13 +291,13 @@ bool target_check_error(target_s *target)
 	return false;
 }
 
-bool target_attached(target_s *target)
+/* Memory access functions */
+bool target_mem32_read(target_s *const target, void *const dest, const target_addr_t src, const size_t len)
 {
-	return target->attached;
+	return target_mem64_read(target, dest, src, len);
 }
 
-/* Memory access functions */
-int target_mem_read(target_s *const target, void *const dest, const target_addr_t src, const size_t len)
+bool target_mem64_read(target_s *const target, void *const dest, const target_addr64_t src, const size_t len)
 {
 	/* If we're processing a semihosting syscall and it needs IO redirected, handle that instead */
 	if (target->target_options & TOPT_IN_SEMIHOSTING_SYSCALL) {
@@ -293,7 +313,12 @@ int target_mem_read(target_s *const target, void *const dest, const target_addr_
 	return target_check_error(target);
 }
 
-int target_mem_write(target_s *const target, const target_addr_t dest, const void *const src, const size_t len)
+bool target_mem32_write(target_s *const target, const target_addr_t dest, const void *const src, const size_t len)
+{
+	return target_mem64_write(target, dest, src, len);
+}
+
+bool target_mem64_write(target_s *const target, const target_addr64_t dest, const void *const src, const size_t len)
 {
 	/* If we're processing a semihosting syscall and it needs IO redirected, handle that instead */
 	if (target->target_options & TOPT_IN_SEMIHOSTING_SYSCALL) {
@@ -319,14 +344,14 @@ bool target_mem_access_needs_halt(target_s *t)
 }
 
 /* Register access functions */
-ssize_t target_reg_read(target_s *t, uint32_t reg, void *data, size_t max)
+size_t target_reg_read(target_s *t, uint32_t reg, void *data, size_t max)
 {
 	if (t->reg_read)
 		return t->reg_read(t, reg, data, max);
 	return 0;
 }
 
-ssize_t target_reg_write(target_s *t, uint32_t reg, const void *data, size_t size)
+size_t target_reg_write(target_s *t, uint32_t reg, const void *data, size_t size)
 {
 	if (t->reg_write)
 		return t->reg_write(t, reg, data, size);
@@ -515,66 +540,40 @@ const char *target_regs_description(target_s *t)
 	return NULL;
 }
 
-const char *target_driver_name(target_s *t)
-{
-	return t->driver;
-}
-
-const char *target_core_name(target_s *t)
-{
-	return t->core;
-}
-
-unsigned int target_designer(target_s *t)
-{
-	return t->designer_code;
-}
-
-unsigned int target_part_id(target_s *t)
-{
-	return t->part_id;
-}
-
-uint32_t target_mem_read32(target_s *t, uint32_t addr)
+uint32_t target_mem32_read32(target_s *target, target_addr32_t addr)
 {
 	uint32_t result = 0;
-	if (t->mem_read)
-		t->mem_read(t, &result, addr, sizeof(result));
+	target_mem32_read(target, &result, addr, sizeof(result));
 	return result;
 }
 
-void target_mem_write32(target_s *t, uint32_t addr, uint32_t value)
+bool target_mem32_write32(target_s *target, target_addr32_t addr, uint32_t value)
 {
-	if (t->mem_write)
-		t->mem_write(t, addr, &value, sizeof(value));
+	return target_mem32_write(target, addr, &value, sizeof(value));
 }
 
-uint16_t target_mem_read16(target_s *t, uint32_t addr)
+uint16_t target_mem32_read16(target_s *target, target_addr32_t addr)
 {
 	uint16_t result = 0;
-	if (t->mem_read)
-		t->mem_read(t, &result, addr, sizeof(result));
+	target_mem32_read(target, &result, addr, sizeof(result));
 	return result;
 }
 
-void target_mem_write16(target_s *t, uint32_t addr, uint16_t value)
+bool target_mem32_write16(target_s *target, target_addr32_t addr, uint16_t value)
 {
-	if (t->mem_write)
-		t->mem_write(t, addr, &value, sizeof(value));
+	return target_mem32_write(target, addr, &value, sizeof(value));
 }
 
-uint8_t target_mem_read8(target_s *t, uint32_t addr)
+uint8_t target_mem32_read8(target_s *target, target_addr32_t addr)
 {
 	uint8_t result = 0;
-	if (t->mem_read)
-		t->mem_read(t, &result, addr, sizeof(result));
+	target_mem32_read(target, &result, addr, sizeof(result));
 	return result;
 }
 
-void target_mem_write8(target_s *t, uint32_t addr, uint8_t value)
+bool target_mem32_write8(target_s *target, target_addr32_t addr, uint8_t value)
 {
-	if (t->mem_write)
-		t->mem_write(t, addr, &value, sizeof(value));
+	return target_mem32_write(target, addr, &value, sizeof(value));
 }
 
 void target_command_help(target_s *t)
@@ -597,16 +596,14 @@ int target_command(target_s *t, int argc, const char *argv[])
 	return -1;
 }
 
-void tc_printf(target_s *t, const char *fmt, ...)
+void tc_printf(target_s *target, const char *fmt, ...)
 {
-	(void)t;
-	va_list ap;
-
-	if (t->tc == NULL)
+	if (target->tc == NULL)
 		return;
 
+	va_list ap;
 	va_start(ap, fmt);
-	t->tc->printf(t->tc, fmt, ap);
+	target->tc->printf(target->tc, fmt, ap);
 	fflush(stdout);
 	va_end(ap);
 }

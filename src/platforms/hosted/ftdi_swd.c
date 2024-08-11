@@ -26,7 +26,6 @@
  */
 
 #include "general.h"
-#include <assert.h>
 #include <stdlib.h>
 
 #include <ftdi.h>
@@ -74,6 +73,15 @@ bool ftdi_swd_possible(void)
 	direct_bb_swd = true;
 	return true;
 }
+
+#if defined(_MSC_VER) && !defined(__clang__)
+static inline uint32_t __builtin_ctz(uint32_t value)
+{
+	uint32_t result = 0U;
+	_BitScanForward(&result, value);
+	return result;
+}
+#endif
 
 bool ftdi_swd_init(void)
 {
@@ -244,7 +252,7 @@ static bool ftdi_swd_seq_in_parity_mpsse(uint32_t *const result, const size_t cl
 	parity ^= data_out[4] & 1U;
 	DEBUG_PROBE("%s %zu clock_cycles: %08" PRIx32 " %s\n", __func__, clock_cycles, data, parity ? "ERR" : "OK");
 	*result = data;
-	return parity;
+	return !parity;
 }
 
 static bool ftdi_swd_seq_in_parity_raw(uint32_t *const result, const size_t clock_cycles)
@@ -271,7 +279,7 @@ static bool ftdi_swd_seq_in_parity_raw(uint32_t *const result, const size_t cloc
 	}
 	DEBUG_PROBE("%s %zu clock_cycles: %08" PRIx32 " %s\n", __func__, clock_cycles, data, parity ? "ERR" : "OK");
 	*result = data;
-	return parity;
+	return !parity;
 }
 
 static bool ftdi_swd_seq_in_parity(uint32_t *const result, const size_t clock_cycles)

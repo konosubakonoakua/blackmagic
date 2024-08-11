@@ -36,7 +36,7 @@ configure_file(
 	configuration: {
 		'PLATFORM_IDENT': f'"(BlackPill-@probe_blackpill_variant@) "',
 		'PLATFORM_CLOCK_FREQ': probe == 'blackpill-f411ce' ? 'RCC_CLOCK_3V3_96MHZ' : 'RCC_CLOCK_3V3_84MHZ',
-  	},
+	},
 )
 
 probe_blackpill_includes = include_directories('.')
@@ -47,7 +47,7 @@ probe_blackpill_dfu_sources = files('usbdfu.c')
 
 bmd_bootloader = get_option('bmd_bootloader')
 
-probe_blackpill_dfu_serial_length = bmd_bootloader ? '9' : '13'
+probe_blackpill_dfu_serial_length = '13'
 probe_blackpill_load_address = bmd_bootloader ? '0x08004000' : '0x08000000'
 
 probe_blackpill_args = [
@@ -78,8 +78,8 @@ probe_host = declare_dependency(
 	include_directories: probe_blackpill_includes,
 	sources: probe_blackpill_sources,
 	compile_args: probe_blackpill_args,
-	link_args: [probe_blackpill_common_link_args, probe_blackpill_link_args],
-	dependencies: [platform_common, platform_stm32f4, fixme_platform_stm32_traceswo],
+	link_args: probe_blackpill_common_link_args + probe_blackpill_link_args,
+	dependencies: [platform_common, platform_stm32f4, fixme_platform_stm32_traceswoasync],
 )
 
 probe_bootloader = declare_dependency(

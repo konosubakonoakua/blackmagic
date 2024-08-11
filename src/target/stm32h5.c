@@ -45,7 +45,8 @@
 #include "general.h"
 #include "target.h"
 #include "target_internal.h"
-#include "cortex.h"
+#include "cortexm.h"
+#include "stm32_common.h"
 
 /* Memory map constants for STM32H5xx */
 #define STM32H5_FLASH_BANK1_BASE 0x08000000U
@@ -97,13 +98,23 @@
 #define STM32H5_FLASH_BANK_MASK         0x80000000U
 #define STM32H5_FLASH_SECTOR_COUNT_MASK 0x000000ffU
 
-#define STM32H5_DBGMCU_BASE   0xe0044000
-#define STM32H5_DBGMCU_IDCODE (STM32H5_DBGMCU_BASE + 0x00U)
-#define STM32H5_UID_BASE      0x08fff800U
+#define STM32H5_DBGMCU_BASE        0xe0044000
+#define STM32H5_DBGMCU_IDCODE      (STM32H5_DBGMCU_BASE + 0x00U)
+#define STM32H5_DBGMCU_CONFIG      (STM32H5_DBGMCU_BASE + 0x04U)
+#define STM32H5_DBGMCU_APB1LFREEZE (STM32H5_DBGMCU_BASE + 0x08U)
+#define STM32H5_DBGMCU_APB1HFREEZE (STM32H5_DBGMCU_BASE + 0x0cU)
+#define STM32H5_DBGMCU_APB2FREEZE  (STM32H5_DBGMCU_BASE + 0x10U)
+#define STM32H5_DBGMCU_APB3FREEZE  (STM32H5_DBGMCU_BASE + 0x14U)
+#define STM32H5_DBGMCU_AHB1FREEZE  (STM32H5_DBGMCU_BASE + 0x20U)
+#define STM32H5_UID_BASE           0x08fff800U
 
-#define STM32H5_DBGMCU_IDCODE_DEV_MASK  0x00000fffU
-#define STM32H5_DBGMCU_IDCODE_REV_MASK  0xffff0000U
-#define STM32H5_DBGMCU_IDCODE_REV_SHIFT 16U
+#define STM32H5_DBGMCU_IDCODE_DEV_MASK    0x00000fffU
+#define STM32H5_DBGMCU_IDCODE_REV_MASK    0xffff0000U
+#define STM32H5_DBGMCU_IDCODE_REV_SHIFT   16U
+#define STM32H5_DBGMCU_CONFIG_DBG_STOP    (1U << 1U)
+#define STM32H5_DBGMCU_CONFIG_DBG_STANDBY (1U << 2U)
+#define STM32H5_DBGMCU_APB1LFREEZE_WWDG   (1U << 11U)
+#define STM32H5_DBGMCU_APB1LFREEZE_IWDG   (1U << 12U)
 
 /* Taken from DBGMCU_IDCODE in §18.12.4 of RM0481 rev 1, pg3085 */
 #define ID_STM32H5xx 0x484U
@@ -115,6 +126,10 @@ typedef struct stm32h5_flash {
 	uint32_t bank_and_sector_count;
 } stm32h5_flash_s;
 
+typedef struct stm32h5_priv {
+	uint32_t dbgmcu_config;
+} stm32h5_priv_s;
+
 static bool stm32h5_cmd_uid(target_s *target, int argc, const char **argv);
 static bool stm32h5_cmd_rev(target_s *target, int argc, const char **argv);
 
@@ -124,6 +139,8 @@ const command_s stm32h5_cmd_list[] = {
 	{NULL, NULL, NULL},
 };
 
+static bool stm32h5_attach(target_s *target);
+static void stm32h5_detach(target_s *target);
 static bool stm32h5_enter_flash_mode(target_s *target);
 static bool stm32h5_exit_flash_mode(target_s *target);
 static bool stm32h5_flash_erase(target_flash_s *flash, target_addr_t addr, size_t len);
@@ -150,6 +167,34 @@ static void stm32h5_add_flash(
 	flash->bank_and_sector_count = bank_and_sector_count;
 }
 
+static bool stm32h5_configure_dbgmcu(target_s *const target)
+{
+	/* If we're in the probe phase */
+	if (target->target_storage == NULL) {
+		/* Allocate target-specific storage */
+		stm32h5_priv_s *const priv_storage = calloc(1, sizeof(*priv_storage));
+		if (!priv_storage) { /* calloc failed: heap exhaustion */
+			DEBUG_ERROR("calloc: failed in %s\n", __func__);
+			return false;
+		}
+		target->target_storage = priv_storage;
+		/* Get the current value of the debug config register (and store it for later) */
+		priv_storage->dbgmcu_config = target_mem32_read32(target, STM32H5_DBGMCU_CONFIG);
+
+		target->attach = stm32h5_attach;
+		target->detach = stm32h5_detach;
+	}
+
+	const stm32h5_priv_s *const priv = (stm32h5_priv_s *)target->target_storage;
+	/* Now we have a stable debug environment, make sure the WDTs can't bonk the processor out from under us */
+	target_mem32_write32(
+		target, STM32H5_DBGMCU_APB1LFREEZE, STM32H5_DBGMCU_APB1LFREEZE_IWDG | STM32H5_DBGMCU_APB1LFREEZE_WWDG);
+	/* Then Reconfigure the config register to prevent WFI/WFE from cutting debug access */
+	target_mem32_write32(target, STM32H5_DBGMCU_CONFIG,
+		priv->dbgmcu_config | STM32H5_DBGMCU_CONFIG_DBG_STANDBY | STM32H5_DBGMCU_CONFIG_DBG_STOP);
+	return true;
+}
+
 bool stm32h5_probe(target_s *const target)
 {
 	const adiv5_access_port_s *const ap = cortex_ap(target);
@@ -157,6 +202,10 @@ bool stm32h5_probe(target_s *const target)
 	if (ap->partno != ID_STM32H5xx && ap->partno != ID_STM32H503)
 		return false;
 	target->part_id = ap->partno;
+
+	/* Now we have a stable debug environment, make sure the WDTs + WFI and WFE instructions can't cause problems */
+	if (!stm32h5_configure_dbgmcu(target))
+		return false;
 
 	target->driver = "STM32H5";
 	target->mass_erase = stm32h5_mass_erase;
@@ -170,9 +219,9 @@ bool stm32h5_probe(target_s *const target)
 		 * Build the RAM map.
 		 * This uses the addresses and sizes found in §2.3.2, Figure 2, pg113 of RM0481 Rev. 1
 		 */
-		target_add_ram(target, STM32H5_SRAM1_BASE, STM32H5_SRAM1_SIZE);
-		target_add_ram(target, STM32H5_SRAM2_BASE, STM32H5_SRAM2_SIZE);
-		target_add_ram(target, STM32H5_SRAM3_BASE, STM32H5_SRAM3_SIZE);
+		target_add_ram32(target, STM32H5_SRAM1_BASE, STM32H5_SRAM1_SIZE);
+		target_add_ram32(target, STM32H5_SRAM2_BASE, STM32H5_SRAM2_SIZE);
+		target_add_ram32(target, STM32H5_SRAM3_BASE, STM32H5_SRAM3_SIZE);
 
 		/* Build the Flash map */
 		stm32h5_add_flash(target, STM32H5_FLASH_BANK1_BASE, STM32H5_FLASH_BANK_SIZE,
@@ -185,8 +234,8 @@ bool stm32h5_probe(target_s *const target)
 		 * Build the RAM map.
 		 * This uses the addresses and sizes found in §2.2.2, Figure 2, pg70 of RM0492 Rev. 2
 		 */
-		target_add_ram(target, STM32H503_SRAM1_BASE, STM32H503_SRAM1_SIZE);
-		target_add_ram(target, STM32H503_SRAM2_BASE, STM32H503_SRAM2_SIZE);
+		target_add_ram32(target, STM32H503_SRAM1_BASE, STM32H503_SRAM1_SIZE);
+		target_add_ram32(target, STM32H503_SRAM2_BASE, STM32H503_SRAM2_SIZE);
 
 		/* Build the Flash map */
 		stm32h5_add_flash(target, STM32H503_FLASH_BANK1_BASE, STM32H503_FLASH_BANK_SIZE,
@@ -199,12 +248,30 @@ bool stm32h5_probe(target_s *const target)
 	return true;
 }
 
+static bool stm32h5_attach(target_s *const target)
+{
+	/*
+	 * Try to attach to the part, and then ensure that the WDTs + WFI and WFE
+	 * instructions can't cause problems (this is duplicated as it's undone by detach.)
+	 */
+	return cortexm_attach(target) && stm32h5_configure_dbgmcu(target);
+}
+
+static void stm32h5_detach(target_s *target)
+{
+	const stm32h5_priv_s *const priv = (stm32h5_priv_s *)target->target_storage;
+	/* Reverse all changes to STM32F4_DBGMCU_CTRL */
+	target_mem32_write32(target, STM32H5_DBGMCU_CONFIG, priv->dbgmcu_config);
+	/* Now defer to the normal Cortex-M detach routine to complete the detach */
+	cortexm_detach(target);
+}
+
 static bool stm32h5_flash_wait_complete(target_s *const target, platform_timeout_s *const timeout)
 {
 	uint32_t status = STM32H5_FLASH_STATUS_BUSY;
 	/* Read the status register and poll for busy and !EOP */
 	while (!(status & STM32H5_FLASH_STATUS_EOP) && (status & STM32H5_FLASH_STATUS_BUSY)) {
-		status = target_mem_read32(target, STM32H5_FLASH_STATUS);
+		status = target_mem32_read32(target, STM32H5_FLASH_STATUS);
 		if (target_check_error(target)) {
 			DEBUG_ERROR("%s: error reading status\n", __func__);
 			return false;
@@ -215,8 +282,8 @@ static bool stm32h5_flash_wait_complete(target_s *const target, platform_timeout
 	if (status & STM32H5_FLASH_STATUS_ERROR_MASK)
 		DEBUG_ERROR("%s: Flash error: %08" PRIx32 "\n", __func__, status);
 	/* Clear all error and status bits */
-	target_mem_write32(
-		target, STM32H5_FLASH_CLEAR_CTRL, (status & (STM32H5_FLASH_STATUS_ERROR_MASK | STM32H5_FLASH_STATUS_EOP)));
+	target_mem32_write32(
+		target, STM32H5_FLASH_CLEAR_CTRL, status & (STM32H5_FLASH_STATUS_ERROR_MASK | STM32H5_FLASH_STATUS_EOP));
 	return !(status & STM32H5_FLASH_STATUS_ERROR_MASK);
 }
 
@@ -227,18 +294,18 @@ static bool stm32h5_enter_flash_mode(target_s *const target)
 	if (!stm32h5_flash_wait_complete(target, NULL))
 		return false;
 	/* Now, if the Flash controller's not already unlocked, unlock it */
-	if (target_mem_read32(target, STM32H5_FLASH_CTRL) & STM32H5_FLASH_CTRL_LOCK) {
-		target_mem_write32(target, STM32H5_FLASH_KEY, STM32H5_FLASH_KEY1);
-		target_mem_write32(target, STM32H5_FLASH_KEY, STM32H5_FLASH_KEY2);
+	if (target_mem32_read32(target, STM32H5_FLASH_CTRL) & STM32H5_FLASH_CTRL_LOCK) {
+		target_mem32_write32(target, STM32H5_FLASH_KEY, STM32H5_FLASH_KEY1);
+		target_mem32_write32(target, STM32H5_FLASH_KEY, STM32H5_FLASH_KEY2);
 	}
 	/* Success of entering Flash mode is predicated on successfully unlocking the controller */
-	return !(target_mem_read32(target, STM32H5_FLASH_CTRL) & STM32H5_FLASH_CTRL_LOCK);
+	return !(target_mem32_read32(target, STM32H5_FLASH_CTRL) & STM32H5_FLASH_CTRL_LOCK);
 }
 
 static bool stm32h5_exit_flash_mode(target_s *const target)
 {
 	/* On leaving Flash mode, lock the controller again */
-	target_mem_write32(target, STM32H5_FLASH_CTRL, STM32H5_FLASH_CTRL_LOCK);
+	target_mem32_write32(target, STM32H5_FLASH_CTRL, STM32H5_FLASH_CTRL_LOCK);
 	target_reset(target);
 	return true;
 }
@@ -256,8 +323,8 @@ static bool stm32h5_flash_erase(target_flash_s *const target_flash, const target
 	for (size_t begin_sector = begin / STM32H5_FLASH_SECTOR_SIZE; begin_sector <= end_sector; ++begin_sector) {
 		/* Erase the current Flash sector */
 		const uint32_t ctrl = bank | STM32H5_FLASH_CTRL_SECTOR_ERASE | STM32H5_FLASH_CTRL_SECTOR(begin_sector);
-		target_mem_write32(target, STM32H5_FLASH_CTRL, ctrl);
-		target_mem_write32(target, STM32H5_FLASH_CTRL, ctrl | STM32H5_FLASH_CTRL_START);
+		target_mem32_write32(target, STM32H5_FLASH_CTRL, ctrl);
+		target_mem32_write32(target, STM32H5_FLASH_CTRL, ctrl | STM32H5_FLASH_CTRL_START);
 
 		/* Wait for the operation to complete, reporting errors */
 		if (!stm32h5_flash_wait_complete(target, NULL))
@@ -271,14 +338,14 @@ static bool stm32h5_flash_write(
 {
 	target_s *const target = flash->t;
 	/* Enable programming operations */
-	target_mem_write32(target, STM32H5_FLASH_CTRL, STM32H5_FLASH_CTRL_PROGRAM);
+	target_mem32_write32(target, STM32H5_FLASH_CTRL, STM32H5_FLASH_CTRL_PROGRAM);
 	/* Write the data to the Flash */
-	target_mem_write(target, dest, src, len);
+	target_mem32_write(target, dest, src, len);
 	/* Wait for the operation to complete and report errors */
 	if (!stm32h5_flash_wait_complete(target, NULL))
 		return false;
 	/* Disable programming operations */
-	target_mem_write32(target, STM32H5_FLASH_CTRL, 0U);
+	target_mem32_write32(target, STM32H5_FLASH_CTRL, 0U);
 	return true;
 }
 
@@ -291,8 +358,8 @@ static bool stm32h5_mass_erase(target_s *const target)
 	platform_timeout_s timeout;
 	platform_timeout_set(&timeout, 500);
 	/* Trigger the mass erase */
-	target_mem_write32(target, STM32H5_FLASH_CTRL, STM32H5_FLASH_CTRL_MASS_ERASE);
-	target_mem_write32(target, STM32H5_FLASH_CTRL, STM32H5_FLASH_CTRL_MASS_ERASE | STM32H5_FLASH_CTRL_START);
+	target_mem32_write32(target, STM32H5_FLASH_CTRL, STM32H5_FLASH_CTRL_MASS_ERASE);
+	target_mem32_write32(target, STM32H5_FLASH_CTRL, STM32H5_FLASH_CTRL_MASS_ERASE | STM32H5_FLASH_CTRL_START);
 	/* And wait for it to complete, reporting errors along the way */
 	const bool result = stm32h5_flash_wait_complete(target, &timeout);
 
@@ -304,14 +371,7 @@ static bool stm32h5_cmd_uid(target_s *target, int argc, const char **argv)
 {
 	(void)argc;
 	(void)argv;
-	tc_printf(target, "0x");
-	for (size_t i = 0U; i < 12U; i += 4U) {
-		const uint32_t value = target_mem_read32(target, STM32H5_UID_BASE + i);
-		tc_printf(target, "%02X%02X%02X%02X", (value >> 24U) & 0xffU, (value >> 16U) & 0xffU, (value >> 8U) & 0xffU,
-			value & 0xffU);
-	}
-	tc_printf(target, "\n");
-	return true;
+	return stm32_uid(target, STM32H5_UID_BASE);
 }
 
 static const struct {
@@ -329,7 +389,7 @@ static bool stm32h5_cmd_rev(target_s *target, int argc, const char **argv)
 	(void)argc;
 	(void)argv;
 	/* Read the device identity register */
-	const uint32_t idcode = target_mem_read32(target, STM32H5_DBGMCU_IDCODE);
+	const uint32_t idcode = target_mem32_read32(target, STM32H5_DBGMCU_IDCODE);
 	const uint16_t rev_id = (idcode & STM32H5_DBGMCU_IDCODE_REV_MASK) >> STM32H5_DBGMCU_IDCODE_REV_SHIFT;
 	const uint16_t dev_id = idcode & STM32H5_DBGMCU_IDCODE_DEV_MASK;
 
